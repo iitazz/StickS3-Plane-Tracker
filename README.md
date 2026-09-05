@@ -22,9 +22,9 @@ If Wi-Fi is not configured, connect to `PlaneTracker-Setup` using password `plan
 
 ## OTA updates
 
-> **Work in progress:** Web UI OTA updates are currently unreliable and may fail. Use USB flashing for now.
-
 Flash the OTA-enabled firmware over USB once. For later updates, run `pio run`, open the device Web UI, select `builds/m5sticks3/plane-tracking.bin`, and upload it. The device shows upload progress and waits for a blue-button press before rebooting into the new firmware.
+
+The Web UI also provides an `Install latest GitHub release` option. It downloads the latest attached `plane-tracking*.bin` asset from the repository's GitHub release, installs it into the inactive OTA partition, and waits for a blue-button press before rebooting.
 
 The Web UI has no authentication. Use it only on a trusted network because anyone with access can change settings or upload firmware.
 
