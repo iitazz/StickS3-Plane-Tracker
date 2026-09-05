@@ -1,0 +1,24 @@
+name: Build firmware
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build with PlatformIO
+        uses: pioarduino/platformio-action@v2
+        with:
+          project-dir: .
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plane-tracker-firmware
+          path: builds/m5sticks3/plane-tracking.bin
