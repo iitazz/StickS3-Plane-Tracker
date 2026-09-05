@@ -16,6 +16,15 @@ The firmware image is generated at `builds/m5sticks3/plane-tracking.bin`.
 
 GitHub Actions builds the firmware automatically on every push and pull request. The compiled `.bin` is available from the workflow run under `plane-tracker-firmware`.
 
+To publish a firmware release, commit the version change, create a matching tag, and push it:
+
+```bash
+git tag v1.0.24
+git push origin v1.0.24
+```
+
+The tagged workflow creates a GitHub Release with generated notes and attaches the firmware `.bin` file.
+
 ## Use
 
 The device starts in the launcher. The top button moves between `PLANE RADAR` and `WEB UI`; the blue button selects. In Plane Radar, the top button selects the next plane, double-press selects the previous plane, the blue button refreshes data, and holding it shows the device address. Hold the top button to return to the launcher.
