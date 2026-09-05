@@ -71,6 +71,7 @@ unsigned long updateButtonIgnoreUntil = 0;
 bool menuNeedsRedraw = true;
 bool webUiNeedsRedraw = true;
 bool trackerPaused = false;
+uint8_t latestUpdateBuffer[4096];
 
 void fetchPlanes();
 void connectWifi();
@@ -89,7 +90,7 @@ constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
 constexpr char GITHUB_LATEST_RELEASE_URL[] = "https://api.github.com/repos/iitazz/StickS3-Plane-Tracker/releases/latest";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.1.0";
+constexpr char FIRMWARE_VERSION[] = "1.1.1";
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -538,19 +539,18 @@ void handleLatestUpdate() {
   if (updateFailed) {
     updateFailure = Update.errorString();
   } else {
-    uint8_t buffer[4096];
     Stream &stream = firmware.getStream();
     while (firmware.connected() && (contentLength < 0 || updateBytesWritten < (size_t)contentLength)) {
-      const size_t requested = contentLength < 0 ? sizeof(buffer) : min(sizeof(buffer), (size_t)contentLength - updateBytesWritten);
-      const size_t read = stream.readBytes(buffer, requested);
+      const size_t requested = contentLength < 0 ? sizeof(latestUpdateBuffer) : min(sizeof(latestUpdateBuffer), (size_t)contentLength - updateBytesWritten);
+      const size_t read = stream.readBytes(latestUpdateBuffer, requested);
       if (read == 0) break;
-      if (updateBytesWritten == 0 && buffer[0] != 0xE9) {
+      if (updateBytesWritten == 0 && latestUpdateBuffer[0] != 0xE9) {
         updateFailure = "Downloaded file is not an ESP32 firmware image";
         updateFailed = true;
         Update.abort();
         break;
       }
-      const size_t written = Update.write(buffer, read);
+      const size_t written = Update.write(latestUpdateBuffer, read);
       updateBytesWritten += written;
       if (written != read) {
         updateFailure = Update.errorString();
@@ -1025,7 +1025,8 @@ void loop() {
         lastDraw = 0;
       }
       if (!trackerPaused && millis() - lastRefresh >= settings.refreshIntervalMs) fetchPlanes();
-      if (millis() - lastDraw >= DISPLAY_FRAME_MS) {
+      if ((!trackerPaused && millis() - lastDraw >= DISPLAY_FRAME_MS) ||
+          (trackerPaused && lastDraw == 0)) {
         lastDraw = millis();
         drawRadar();
         if (!trackerPaused) sweepAngle = fmodf(sweepAngle + 4.0f, 360.0f);
