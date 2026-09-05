@@ -2,11 +2,8 @@ name: Build firmware
 
 on:
   push:
-    branches:
-      - "**"
     tags:
       - "v*"
-  pull_request:
 
 permissions:
   contents: write

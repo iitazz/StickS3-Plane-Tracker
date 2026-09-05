@@ -14,7 +14,7 @@ pio run -t upload
 
 The firmware image is generated at `builds/m5sticks3/plane-tracking.bin`.
 
-GitHub Actions builds the firmware automatically on every push and pull request. The compiled `.bin` is available from the workflow run under `plane-tracker-firmware`.
+GitHub Actions builds the firmware only when a release tag is pushed. The compiled `.bin` is available from the workflow run under `plane-tracker-firmware`.
 
 To publish a firmware release, commit the version change, create a matching tag, and push it:
 
