@@ -37,4 +37,3 @@ The aircraft information panel is on the right side of the radar. The Web UI inc
 
 The web page also lets you change the airport label, scan-center latitude and longitude, scan radius in kilometers, and data refresh interval. Settings are stored in flash and survive reboot. The display redraws four times per second and the default data refresh is 30 seconds; both the display timing and initial defaults are in [include/config.h](include/config.h).
 
-The original [plane-tracker.js](plane-tracker.js) is retained as the Bruce-JS prototype and API reference.
