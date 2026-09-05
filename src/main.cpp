@@ -32,7 +32,7 @@ struct TrackerSettings {
   bool autoRotate;
 };
 
-enum AppMode { MODE_MENU, MODE_TRACKER, MODE_WEB_UI, MODE_FIRMWARE_UPDATE };
+enum AppMode { MODE_MENU, MODE_TRACKER, MODE_FIRMWARE_UPDATE };
 
 Plane planes[MAX_PLANES];
 size_t planeCount = 0;
@@ -67,13 +67,14 @@ bool updateReady = false;
 bool updateScreenError = false;
 bool updateScreenNeedsRedraw = true;
 size_t lastUpdateScreenBytes = 0;
+unsigned long updateButtonIgnoreUntil = 0;
 bool menuNeedsRedraw = true;
 bool webUiNeedsRedraw = true;
+bool trackerPaused = false;
 
 void fetchPlanes();
 void connectWifi();
 void exitToMenu();
-void stopDebugServer();
 void drawFirmwareUpdate();
 
 // Centralized physical control mapping for every app mode.
@@ -85,9 +86,10 @@ bool controlExit() { return M5.BtnB.wasHold(); }
 bool controlShowIp() { return M5.BtnA.wasHold(); }
 
 constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
+constexpr char GITHUB_LATEST_RELEASE_URL[] = "https://api.github.com/repos/iitazz/StickS3-Plane-Tracker/releases/latest";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.0.26";
+constexpr char FIRMWARE_VERSION[] = "1.1.0";
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -98,9 +100,9 @@ dt{color:#8cff9b;margin-top:10px}dd{margin:3px 0 0 0;color:#fff}button{backgroun
 </style></head><body><h1>Plane Tracker <small id="firmwareVersion"></small></h1><section><form action="/api/config" method="post">
 <label>Airport preset <select id="airportPreset"><option value="">Manual coordinates</option><option value="FCO" data-lat="41.8003" data-lon="12.2389">FCO - Rome</option><option value="LHR" data-lat="51.4700" data-lon="-0.4543">LHR - London</option><option value="CDG" data-lat="49.0097" data-lon="2.5479">CDG - Paris</option><option value="AMS" data-lat="52.3086" data-lon="4.7639">AMS - Amsterdam</option><option value="FRA" data-lat="50.0379" data-lon="8.5622">FRA - Frankfurt</option><option value="MAD" data-lat="40.4983" data-lon="-3.5676">MAD - Madrid</option><option value="JFK" data-lat="40.6413" data-lon="-73.7781">JFK - New York</option><option value="LAX" data-lat="33.9416" data-lon="-118.4085">LAX - Los Angeles</option><option value="ORD" data-lat="41.9742" data-lon="-87.9073">ORD - Chicago</option><option value="DXB" data-lat="25.2532" data-lon="55.3657">DXB - Dubai</option><option value="HND" data-lat="35.5494" data-lon="139.7798">HND - Tokyo</option><option value="SIN" data-lat="1.3644" data-lon="103.9915">SIN - Singapore</option></select></label><label>Airport <input name="airport" maxlength="12"></label><label>Latitude <input name="latitude" type="number" step="0.0001"></label><label>Longitude <input name="longitude" type="number" step="0.0001"></label><label>Radar range km <input name="range" type="number" min="5" max="500" step="1"></label><label>Refresh sec <input name="refresh" type="number" min="10" max="3600" step="1"></label><label>Auto rotate <input name="autorotate" type="checkbox"></label><br><button type="submit">Save and refresh</button></form></section><section><button onclick="load()">Refresh diagnostics</button><dl id="data">Loading...</dl></section>
 <section><h2>Wi-Fi setup</h2><form action="/api/wifi" method="post"><label>Found networks <select id="wifiNetworks"><option value="">Scan for networks</option></select></label><button id="wifiScanButton" type="button" onclick="scanWifi()">Scan networks</button> <span id="wifiScanStatus"></span><br><label>Network <input id="wifiSsid" name="ssid" maxlength="32" required></label><label>Password <input name="password" type="password" maxlength="64"></label><br><button type="submit">Save Wi-Fi and reboot</button></form></section>
-<section><h2>Firmware update</h2><form id="firmwareForm" action="/api/update" method="post" enctype="multipart/form-data"><input name="firmware" type="file" accept=".bin,application/octet-stream" required><br><button id="firmwareButton" type="submit">Upload firmware and reboot</button> <span id="firmwareStatus"></span></form></section>
-<section><form action="/api/webui" method="post"><button name="action" value="disable" type="submit">Disable Web UI</button></form></section>
+<section><h2>Firmware update</h2><form id="firmwareForm" action="/api/update" method="post" enctype="multipart/form-data"><input name="firmware" type="file" accept=".bin,application/octet-stream" required><br><button id="firmwareButton" type="submit">Upload firmware and reboot</button> <span id="firmwareStatus"></span></form><button id="latestFirmwareButton" type="button">Install latest GitHub release</button> <span id="latestFirmwareStatus"></span></section>
 <script>const firmwareForm=document.querySelector('#firmwareForm');firmwareForm.addEventListener('submit',async event=>{event.preventDefault();const button=document.querySelector('#firmwareButton');const status=document.querySelector('#firmwareStatus');button.disabled=true;button.textContent='Uploading...';status.textContent='Uploading firmware; do not disconnect';try{const response=await fetch(firmwareForm.action,{method:'POST',body:new FormData(firmwareForm)});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent='Update ready. Press BLUE on the device to reboot.'}catch(error){status.textContent=error.message.startsWith('Firmware update failed')?error.message:'Upload connection lost; check the device screen'}finally{button.disabled=false;button.textContent='Upload firmware and reboot'}});</script>
+<script>document.querySelector('#latestFirmwareButton').addEventListener('click',async()=>{const button=document.querySelector('#latestFirmwareButton');const status=document.querySelector('#latestFirmwareStatus');button.disabled=true;status.textContent='Downloading latest GitHub release; do not disconnect';try{const response=await fetch('/api/update-latest',{method:'POST'});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent=message}catch(error){status.textContent=error.message}finally{button.disabled=false}});</script>
 <script>async function scanWifi(){const select=document.querySelector('#wifiNetworks');const button=document.querySelector('#wifiScanButton');const status=document.querySelector('#wifiScanStatus');button.disabled=true;button.textContent='Scanning...';status.textContent='Scanning nearby networks';select.innerHTML='<option value="">Scanning...</option>';try{const r=await fetch('/api/wifi/scan');if(!r.ok)throw new Error(await r.text());const networks=await r.json();select.innerHTML='<option value="">Select a network</option>';for(const network of networks){const option=document.createElement('option');option.value=network.ssid;option.textContent=network.ssid+' ('+network.rssi+' dBm)';select.appendChild(option)}if(!networks.length){select.innerHTML='<option value="">No networks found</option>';status.textContent='Scan finished: no networks found'}else status.textContent='Scan finished: '+networks.length+' network'+(networks.length===1?'':'s')}catch(error){select.innerHTML='<option value="">Scan failed</option>';status.textContent='Scan failed';alert(error.message)}finally{button.disabled=false;button.textContent='Scan networks'}}document.querySelector('#wifiNetworks').addEventListener('change',event=>{if(event.target.value)document.querySelector('#wifiSsid').value=event.target.value});let configDirty=false;const configForm=document.querySelector('form[action="/api/config"]');const airportPreset=document.querySelector('#airportPreset');configForm.addEventListener('input',()=>configDirty=true);airportPreset.addEventListener('change',()=>{const option=airportPreset.selectedOptions[0];if(option.value){document.querySelector('[name=airport]').value=option.value;document.querySelector('[name=latitude]').value=option.dataset.lat;document.querySelector('[name=longitude]').value=option.dataset.lon}configDirty=true});async function load(){const r=await fetch('/api/status');const d=await r.json();document.querySelector('#firmwareVersion').textContent='FW v'+d.firmwareVersion;if(!configDirty){for(const k of ['airport','latitude','longitude','rangeKm','refreshSeconds']){const e=document.querySelector('[name='+({rangeKm:'range',refreshSeconds:'refresh'}[k]||k)+']');if(e)e.value=d[k]}const matchingPreset=[...airportPreset.options].find(option=>option.value===d.airport&&Math.abs(Number(option.dataset.lat)-Number(d.latitude))<0.0001&&Math.abs(Number(option.dataset.lon)-Number(d.longitude))<0.0001);airportPreset.value=matchingPreset?d.airport:'';document.querySelector('[name=autorotate]').checked=!!d.autoRotate}let out='';for(const [k,v] of Object.entries(d)){out+='<dt>'+k+'</dt><dd>'+String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</dd>'}document.querySelector('#data').innerHTML=out}load();setInterval(load,5000)</script>
 </body></html>
 )rawliteral";
@@ -333,7 +335,6 @@ void handleUpdateUpload() {
     updateScreenNeedsRedraw = true;
     lastUpdateScreenBytes = 0;
     lastDraw = 0;
-    appMode = MODE_FIRMWARE_UPDATE;
     drawFirmwareUpdate();
     lastUpdateResult = "receiving " + upload.filename;
     Serial.println("OTA upload started: " + upload.filename);
@@ -344,25 +345,20 @@ void handleUpdateUpload() {
       updateInProgress = false;
       updateScreenError = true;
       updateScreenNeedsRedraw = true;
+      appMode = MODE_FIRMWARE_UPDATE;
+      updateButtonIgnoreUntil = millis() + 1500;
       drawFirmwareUpdate();
       return;
     }
-    if (upload.totalSize == 0) {
-      updateFailed = true;
-      updateFailure = "Upload has no data";
-      updateInProgress = false;
-      updateScreenError = true;
-      updateScreenNeedsRedraw = true;
-      drawFirmwareUpdate();
-      return;
-    }
-    updateFailed = !Update.begin(upload.totalSize, U_FLASH);
+    updateFailed = !Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH);
     if (updateFailed) {
       updateFailure = Update.errorString();
       lastUpdateResult = updateFailure;
       updateInProgress = false;
       updateScreenError = true;
       updateScreenNeedsRedraw = true;
+      appMode = MODE_FIRMWARE_UPDATE;
+      updateButtonIgnoreUntil = millis() + 1500;
       drawFirmwareUpdate();
     }
   } else if (upload.status == UPLOAD_FILE_WRITE && !updateFailed) {
@@ -394,18 +390,32 @@ void handleUpdateUpload() {
       drawFirmwareUpdate();
     }
   } else if (upload.status == UPLOAD_FILE_END && !updateFailed) {
-    if (!Update.end(true)) {
+    if (updateBytesWritten == 0) {
+      updateFailed = true;
+      updateFailure = "Upload has no data";
+      updateInProgress = false;
+      updateScreenError = true;
+      updateScreenNeedsRedraw = true;
+      appMode = MODE_FIRMWARE_UPDATE;
+      updateButtonIgnoreUntil = millis() + 1500;
+      Update.abort();
+      drawFirmwareUpdate();
+    } else if (!Update.end(true)) {
       updateFailed = true;
       updateFailure = Update.errorString();
       lastUpdateResult = updateFailure;
       updateInProgress = false;
       updateScreenError = true;
       updateScreenNeedsRedraw = true;
+      appMode = MODE_FIRMWARE_UPDATE;
+      updateButtonIgnoreUntil = millis() + 1500;
       drawFirmwareUpdate();
     } else {
       updateInProgress = false;
       updateReady = true;
       updateScreenNeedsRedraw = true;
+      appMode = MODE_FIRMWARE_UPDATE;
+      updateButtonIgnoreUntil = millis() + 1500;
       drawFirmwareUpdate();
       lastUpdateResult = "committed " + String(updateBytesWritten) + " bytes";
       Serial.println("OTA upload committed: " + String(updateBytesWritten) + " bytes");
@@ -417,6 +427,8 @@ void handleUpdateUpload() {
     updateInProgress = false;
     updateScreenError = true;
     updateScreenNeedsRedraw = true;
+    appMode = MODE_FIRMWARE_UPDATE;
+    updateButtonIgnoreUntil = millis() + 1500;
     drawFirmwareUpdate();
     Update.abort();
   }
@@ -444,16 +456,144 @@ void handleUpdateSave() {
   lastUpdateResult = "update ready; press device button";
 }
 
-void handleWebUiControl() {
-  if (webServer.arg("action") != "disable") {
-    webServer.send(400, "text/plain", "Unknown Web UI action");
+void handleLatestUpdate() {
+  connectWifi();
+  if (provisioningMode || WiFi.status() != WL_CONNECTED) {
+    webServer.send(503, "text/plain", "Wi-Fi not connected");
     return;
   }
 
-  webServer.send(200, "text/plain", "Web UI disabled. The device is returning to the menu.");
-  delay(100);
-  stopDebugServer();
-  exitToMenu();
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient api;
+  api.setTimeout(15000);
+  api.begin(client, GITHUB_LATEST_RELEASE_URL);
+  api.addHeader("Accept", "application/vnd.github+json");
+  api.addHeader("User-Agent", "StickS3-Plane-Tracker");
+  const int apiResult = api.GET();
+  if (apiResult != HTTP_CODE_OK) {
+    const String error = api.errorToString(apiResult);
+    api.end();
+    webServer.send(502, "text/plain", "GitHub release lookup failed: " + error);
+    return;
+  }
+
+  JsonDocument release;
+  const DeserializationError parseError = deserializeJson(release, api.getStream());
+  api.end();
+  if (parseError) {
+    webServer.send(502, "text/plain", "Invalid GitHub release response");
+    return;
+  }
+
+  String assetUrl;
+  String assetName;
+  for (JsonObject asset : release["assets"].as<JsonArray>()) {
+    const String name = asset["name"] | "";
+    if (name.startsWith("plane-tracking") && name.endsWith(".bin")) {
+      assetName = name;
+      assetUrl = asset["browser_download_url"] | "";
+      break;
+    }
+  }
+  if (assetUrl.isEmpty()) {
+    webServer.send(404, "text/plain", "Latest GitHub release has no plane-tracking .bin asset");
+    return;
+  }
+
+  updateBytesWritten = 0;
+  updateFailure = "";
+  updateFailed = false;
+  updateInProgress = true;
+  updateReady = false;
+  updateScreenError = false;
+  updateScreenNeedsRedraw = true;
+  lastUpdateScreenBytes = 0;
+  lastDraw = 0;
+  lastUpdateResult = "downloading " + assetName;
+  drawFirmwareUpdate();
+
+  HTTPClient firmware;
+  firmware.setTimeout(15000);
+  firmware.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  firmware.begin(client, assetUrl);
+  firmware.addHeader("User-Agent", "StickS3-Plane-Tracker");
+  const int firmwareResult = firmware.GET();
+  if (firmwareResult != HTTP_CODE_OK) {
+    updateFailure = "GitHub firmware download failed: " + firmware.errorToString(firmwareResult);
+    firmware.end();
+    updateFailed = true;
+    updateInProgress = false;
+    updateScreenError = true;
+    updateScreenNeedsRedraw = true;
+    appMode = MODE_FIRMWARE_UPDATE;
+    updateButtonIgnoreUntil = millis() + 1500;
+    drawFirmwareUpdate();
+    webServer.send(502, "text/plain", updateFailure);
+    return;
+  }
+
+  const int contentLength = firmware.getSize();
+  updateFailed = !Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN, U_FLASH);
+  if (updateFailed) {
+    updateFailure = Update.errorString();
+  } else {
+    uint8_t buffer[4096];
+    Stream &stream = firmware.getStream();
+    while (firmware.connected() && (contentLength < 0 || updateBytesWritten < (size_t)contentLength)) {
+      const size_t requested = contentLength < 0 ? sizeof(buffer) : min(sizeof(buffer), (size_t)contentLength - updateBytesWritten);
+      const size_t read = stream.readBytes(buffer, requested);
+      if (read == 0) break;
+      if (updateBytesWritten == 0 && buffer[0] != 0xE9) {
+        updateFailure = "Downloaded file is not an ESP32 firmware image";
+        updateFailed = true;
+        Update.abort();
+        break;
+      }
+      const size_t written = Update.write(buffer, read);
+      updateBytesWritten += written;
+      if (written != read) {
+        updateFailure = Update.errorString();
+        updateFailed = true;
+        break;
+      }
+      if (updateBytesWritten - lastUpdateScreenBytes >= 65536) {
+        drawFirmwareUpdate();
+        lastUpdateScreenBytes = updateBytesWritten;
+      }
+    }
+    if (!updateFailed && (updateBytesWritten == 0 || (contentLength > 0 && updateBytesWritten != (size_t)contentLength))) {
+      updateFailure = "GitHub firmware download was incomplete";
+      updateFailed = true;
+    }
+    if (!updateFailed && !Update.end(true)) {
+      updateFailure = Update.errorString();
+      updateFailed = true;
+    }
+  }
+  firmware.end();
+
+  updateInProgress = false;
+  if (updateFailed) {
+    Update.abort();
+    updateReady = false;
+    updateScreenError = true;
+    updateScreenNeedsRedraw = true;
+    appMode = MODE_FIRMWARE_UPDATE;
+    updateButtonIgnoreUntil = millis() + 1500;
+    lastUpdateResult = "failed: " + updateFailure;
+    drawFirmwareUpdate();
+    webServer.send(500, "text/plain", updateFailure);
+    return;
+  }
+
+  updateReady = true;
+  updateScreenNeedsRedraw = true;
+  appMode = MODE_FIRMWARE_UPDATE;
+  updateButtonIgnoreUntil = millis() + 1500;
+  lastUpdateResult = "committed " + String(updateBytesWritten) + " bytes from " + assetName;
+  drawFirmwareUpdate();
+  webServer.send(200, "text/plain", "Latest release downloaded. Press BLUE to reboot.");
 }
 
 void startDebugServer() {
@@ -465,7 +605,7 @@ void startDebugServer() {
     webServer.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
     webServer.on("/api/wifi", HTTP_POST, handleWifiSave);
     webServer.on("/api/update", HTTP_POST, handleUpdateSave, handleUpdateUpload);
-    webServer.on("/api/webui", HTTP_POST, handleWebUiControl);
+    webServer.on("/api/update-latest", HTTP_POST, handleLatestUpdate);
     debugRoutesConfigured = true;
   }
   webServer.begin();
@@ -478,12 +618,6 @@ void startDebugServer() {
     Serial.println(SETUP_AP_NAME);
     Serial.println("Setup password: planeconfig");
   }
-}
-
-void stopDebugServer() {
-  if (!debugServerStarted) return;
-  webServer.stop();
-  debugServerStarted = false;
 }
 
 void fetchSelectedRoute() {
@@ -658,7 +792,7 @@ void drawRadar() {
 
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString(scrollingText(settings.airport + " " + statusText, 15), infoX, 3);
+  M5.Display.drawString(scrollingText(settings.airport + " " + (trackerPaused ? "PAUSED" : statusText), 15), infoX, 3);
 
   if (planeCount > 0) {
     const Plane &plane = planes[selectedPlane];
@@ -735,70 +869,26 @@ void drawMenu() {
   M5.Display.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString("LAUNCHER", 10, 5);
+  M5.Display.drawString("PLANE TRACKER", 10, 5);
   M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString(provisioningMode ? "SETUP AP" : "PLANE TRACKER", width - 92, 5);
+  M5.Display.drawString(provisioningMode ? "SETUP AP" : "WEB UI ON", width - 70, 5);
   M5.Display.drawLine(8, 19, width - 8, 19, TFT_DARKGREEN);
-
   const int rowX = 8;
   const int rowWidth = width - 16;
   const int rowHeight = 27;
-  const int rowY[2] = {27, 57};
-  for (int index = 0; index < 2; ++index) {
-    const bool selected = menuSelection == index;
-    if (selected) {
-      M5.Display.fillRect(rowX, rowY[index], rowWidth, rowHeight, TFT_GREEN);
-      M5.Display.fillRect(rowX, rowY[index], 4, rowHeight, TFT_YELLOW);
-    }
-  }
-
-  const int radarIconX = 27;
-  const int radarIconY = rowY[0] + rowHeight / 2 - 1;
-  const uint16_t radarColor = menuSelection == 0 ? TFT_BLACK : TFT_GREEN;
-  M5.Display.setTextColor(radarColor, TFT_BLACK);
-  M5.Display.drawCircle(radarIconX, radarIconY, 8, radarColor);
-  M5.Display.drawCircle(radarIconX, radarIconY, 3, radarColor);
-  M5.Display.drawLine(radarIconX, radarIconY, radarIconX + 8, radarIconY - 6,
-                      radarColor);
-  M5.Display.setTextColor(menuSelection == 0 ? TFT_BLACK : TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString("PLANE RADAR", 48, rowY[0] + 9);
-
-  const int webIconX = 27;
-  const int webIconY = rowY[1] + rowHeight / 2 - 1;
-  const uint16_t webColor = menuSelection == 1 ? TFT_BLACK : TFT_GREEN;
-  M5.Display.drawRect(webIconX - 9, webIconY - 6, 18, 12, webColor);
-  M5.Display.drawLine(webIconX - 7, webIconY - 2, webIconX + 7, webIconY - 2, webColor);
-  M5.Display.fillCircle(webIconX - 5, webIconY - 4, 1, webColor);
-  M5.Display.fillCircle(webIconX - 1, webIconY - 4, 1, webColor);
-  M5.Display.setTextColor(menuSelection == 1 ? TFT_BLACK : TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString("WEB UI", 48, rowY[1] + 9);
-
+  const int rowY = 27;
+  M5.Display.fillRect(rowX, rowY, rowWidth, rowHeight, TFT_GREEN);
+  M5.Display.fillRect(rowX, rowY, 4, rowHeight, TFT_YELLOW);
+  const int iconX = 27;
+  const int iconY = rowY + rowHeight / 2 - 1;
+  M5.Display.setTextColor(TFT_BLACK, TFT_BLACK);
+  M5.Display.drawCircle(iconX, iconY, 8, TFT_BLACK);
+  M5.Display.drawCircle(iconX, iconY, 3, TFT_BLACK);
+  M5.Display.drawLine(iconX, iconY, iconX + 8, iconY - 6, TFT_BLACK);
+  M5.Display.drawString("PLANE RADAR", 48, rowY + 9);
   M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString("NEXT", 10, height - 13);
   M5.Display.drawString("SELECT", width - 48, height - 13);
   menuNeedsRedraw = false;
-}
-
-void drawWebUi() {
-  const int width = M5.Display.width();
-  const int height = M5.Display.height();
-  const bool hasAddress = provisioningMode || WiFi.status() == WL_CONNECTED;
-  const String address = provisioningMode
-                             ? WiFi.softAPIP().toString()
-                             : WiFi.localIP().toString();
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString(provisioningMode ? "WIFI SETUP ACTIVE" : "WEB UI ACTIVE", 12, 16);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString(hasAddress ? "http://" + address : "NO WIFI", 12, 48);
-  M5.Display.drawString(provisioningMode ? "AP: PlaneTracker-Setup" : debugServerStarted ? "SERVER ON" : "NO WIFI", 12, 70);
-  drawBatteryIndicator(width - 4, 5);
-  M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString("BLUE DISABLE", 12, height - 22);
-  M5.Display.drawString("BLUE HOLD IP", width - 76, height - 22);
-  webUiNeedsRedraw = false;
 }
 
 void drawFirmwareUpdate() {
@@ -831,17 +921,10 @@ void drawFirmwareUpdate() {
 
 void enterTracker() {
   appMode = MODE_TRACKER;
+  trackerPaused = false;
   lastDraw = 0;
   webUiNeedsRedraw = true;
   fetchPlanes();
-}
-
-void enterWebUi() {
-  connectWifi();
-  startDebugServer();
-  appMode = MODE_WEB_UI;
-  lastDraw = 0;
-  webUiNeedsRedraw = true;
 }
 
 void exitToMenu() {
@@ -854,20 +937,9 @@ void exitToMenu() {
 }
 
 void handleMenuButtons() {
-  if (controlNext()) {
-    menuSelection = (menuSelection + 1) % 2;
-    menuNeedsRedraw = true;
-  }
-  if (controlPrevious()) {
-    menuSelection = menuSelection == 0 ? 1 : menuSelection - 1;
-    menuNeedsRedraw = true;
-  }
+  if (controlNext() || controlPrevious()) menuSelection = 0;
   if (controlSelect()) {
-    if (menuSelection == 0) {
-      enterTracker();
-    } else if (menuSelection == 1) {
-      enterWebUi();
-    }
+    enterTracker();
   }
   if (controlShowIp()) {
     ipOverlayUntil = millis() + 5000;
@@ -877,7 +949,8 @@ void handleMenuButtons() {
 
 void handleTrackerButtons() {
   if (controlExit()) {
-    exitToMenu();
+    trackerPaused = !trackerPaused;
+    lastDraw = 0;
     return;
   }
   if (controlShowIp()) {
@@ -898,20 +971,8 @@ void handleTrackerButtons() {
   if (controlSelect()) fetchPlanes();
 }
 
-void handleWebUiButtons() {
-  if (controlExit()) exitToMenu();
-  if (controlSelect()) {
-    stopDebugServer();
-    exitToMenu();
-    return;
-  }
-  if (controlShowIp()) {
-    ipOverlayUntil = millis() + 5000;
-    ipOverlayDrawn = false;
-  }
-}
-
 void handleFirmwareUpdateButtons() {
+  if ((long)(updateButtonIgnoreUntil - millis()) > 0) return;
   if (!controlSelect()) return;
   if (updateReady && !updateInProgress && !updateFailed) {
     Preferences preferences;
@@ -940,6 +1001,7 @@ void setup() {
   loadSettings();
   connectWifi();
   startDebugServer();
+  enterTracker();
 }
 
 void loop() {
@@ -950,7 +1012,7 @@ void loop() {
     if (menuNeedsRedraw) drawMenu();
   } else if (appMode == MODE_TRACKER) {
     handleTrackerButtons();
-    updateAutoRotation();
+    if (!trackerPaused) updateAutoRotation();
     if (ipOverlayActive()) {
       if (!ipOverlayDrawn) {
         drawRadar();
@@ -962,23 +1024,12 @@ void loop() {
         ipOverlayDrawn = false;
         lastDraw = 0;
       }
-      if (millis() - lastRefresh >= settings.refreshIntervalMs) fetchPlanes();
+      if (!trackerPaused && millis() - lastRefresh >= settings.refreshIntervalMs) fetchPlanes();
       if (millis() - lastDraw >= DISPLAY_FRAME_MS) {
         lastDraw = millis();
         drawRadar();
-        sweepAngle = fmodf(sweepAngle + 4.0f, 360.0f);
+        if (!trackerPaused) sweepAngle = fmodf(sweepAngle + 4.0f, 360.0f);
       }
-    }
-  } else if (appMode == MODE_WEB_UI) {
-    handleWebUiButtons();
-    if (!ipOverlayActive() && ipOverlayDrawn) {
-      ipOverlayDrawn = false;
-      webUiNeedsRedraw = true;
-    }
-    if (webUiNeedsRedraw) drawWebUi();
-    if (ipOverlayActive() && !ipOverlayDrawn) {
-      drawIpOverlay();
-      ipOverlayDrawn = true;
     }
   } else {
     handleFirmwareUpdateButtons();
