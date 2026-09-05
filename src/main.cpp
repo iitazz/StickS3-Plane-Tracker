@@ -12,6 +12,7 @@
 #include "config.h"
 
 struct Plane {
+  String icao24;
   String callsign;
   String route;
   float latitude;
@@ -36,6 +37,7 @@ enum AppMode { MODE_MENU, MODE_TRACKER, MODE_WEB_UI, MODE_FIRMWARE_UPDATE };
 Plane planes[MAX_PLANES];
 size_t planeCount = 0;
 size_t selectedPlane = 0;
+String selectedPlaneIcao24 = "";
 unsigned long lastRefresh = 0;
 String statusText = "STARTING";
 String lastContentType = "";
@@ -542,6 +544,7 @@ void connectWifi() {
 }
 
 void fetchPlanes() {
+  const String previousSelectedIcao24 = selectedPlane < planeCount ? planes[selectedPlane].icao24 : selectedPlaneIcao24;
   connectWifi();
   if (provisioningMode || WiFi.status() != WL_CONNECTED) {
     lastHttpCode = 0;
@@ -592,6 +595,7 @@ void fetchPlanes() {
     if (state[5].isNull() || state[6].isNull()) continue;
 
     Plane &plane = planes[planeCount];
+    plane.icao24 = state[0].as<const char *>();
     plane.callsign = state[1].as<const char *>();
     plane.callsign.trim();
     plane.longitude = state[5].as<float>();
@@ -612,7 +616,16 @@ void fetchPlanes() {
       }
     }
   }
-  if (selectedPlane >= planeCount) selectedPlane = planeCount == 0 ? 0 : planeCount - 1;
+  selectedPlane = planeCount == 0 ? 0 : planeCount - 1;
+  if (previousSelectedIcao24.length()) {
+    for (size_t i = 0; i < planeCount; ++i) {
+      if (planes[i].icao24 == previousSelectedIcao24) {
+        selectedPlane = i;
+        break;
+      }
+    }
+  }
+  selectedPlaneIcao24 = planeCount > 0 ? planes[selectedPlane].icao24 : previousSelectedIcao24;
   statusText = planeCount == 0 ? "NO TRAFFIC" : "OPEN SKY";
   lastRefresh = millis();
   fetchSelectedRoute();
@@ -864,10 +877,12 @@ void handleTrackerButtons() {
   }
   if (controlNext() && planeCount > 0) {
     selectedPlane = (selectedPlane + 1) % planeCount;
+    selectedPlaneIcao24 = planes[selectedPlane].icao24;
     fetchSelectedRoute();
   }
   if (controlPrevious() && planeCount > 0) {
     selectedPlane = selectedPlane == 0 ? planeCount - 1 : selectedPlane - 1;
+    selectedPlaneIcao24 = planes[selectedPlane].icao24;
     fetchSelectedRoute();
   }
   if (controlSelect()) fetchPlanes();
