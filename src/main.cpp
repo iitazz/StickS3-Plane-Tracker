@@ -85,7 +85,7 @@ bool controlShowIp() { return M5.BtnA.wasHold(); }
 constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.0.17";
+constexpr char FIRMWARE_VERSION[] = "1.0.19";
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
