@@ -1,6 +1,6 @@
 # M5StickS3 Plane Tracker
 
-> **AI disclosure:** AI tools were used to assist with parts of this project. The project owner reviewed and is responsible for the final code.
+> **AI disclosure:** AI tools were used to assist with parts of this project. Anyone installing or running this firmware is responsible for understanding and accepting what it does on their device.
 
 Arduino/PlatformIO firmware for the M5StickS3. It displays nearby aircraft from OpenSky on a radar centered on a configurable airport or latitude/longitude.
 
@@ -18,7 +18,7 @@ The firmware image is generated at `builds/m5sticks3/plane-tracking.bin`.
 
 The device starts in the launcher. The top button moves between `PLANE RADAR` and `WEB UI`; the blue button selects. In Plane Radar, the top button selects the next plane, double-press selects the previous plane, the blue button refreshes data, and holding it shows the device address. Hold the top button to return to the launcher.
 
-If Wi-Fi is not configured, connect to `PlaneTracker-Setup` using password `planeconfig`, then open `http://192.168.4.1`. The Web UI can scan for nearby networks, select an SSID, configure an airport or manual coordinates, change radar range, and enable auto-rotation.
+If Wi-Fi is not configured, connect to `PlaneTracker-Setup` using password `planeconfig`, then open `http://192.168.4.1`. The Web UI can scan for nearby networks, select an SSID, configure an airport or manual coordinates, change the radar range shown on the device, and enable auto-rotation.
 
 ## OTA updates
 
