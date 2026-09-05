@@ -1,0 +1,9 @@
+#pragma once
+
+#define RADAR_LAT 41.9028
+#define RADAR_LON 12.4964
+#define RADAR_RANGE_KM 65.0f
+#define REFRESH_INTERVAL_MS 30000UL
+#define DISPLAY_FRAME_MS 250UL
+#define AUTO_ROTATE_DEFAULT true
+#define MAX_PLANES 32
