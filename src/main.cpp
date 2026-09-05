@@ -87,7 +87,7 @@ bool controlShowIp() { return M5.BtnA.wasHold(); }
 constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.0.25";
+constexpr char FIRMWARE_VERSION[] = "1.0.26";
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -326,6 +326,7 @@ void handleUpdateUpload() {
   if (upload.status == UPLOAD_FILE_START) {
     updateBytesWritten = 0;
     updateFailure = "";
+    updateFailed = false;
     updateInProgress = true;
     updateReady = false;
     updateScreenError = false;
@@ -346,7 +347,16 @@ void handleUpdateUpload() {
       drawFirmwareUpdate();
       return;
     }
-    updateFailed = !Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH);
+    if (upload.totalSize == 0) {
+      updateFailed = true;
+      updateFailure = "Upload has no data";
+      updateInProgress = false;
+      updateScreenError = true;
+      updateScreenNeedsRedraw = true;
+      drawFirmwareUpdate();
+      return;
+    }
+    updateFailed = !Update.begin(upload.totalSize, U_FLASH);
     if (updateFailed) {
       updateFailure = Update.errorString();
       lastUpdateResult = updateFailure;
