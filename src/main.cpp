@@ -204,6 +204,10 @@ void drawBatteryIndicator(int right, int top) {
   const int battery = constrain((int)M5.Power.getBatteryLevel(), 0, 100);
   const uint16_t color = battery <= 20 ? TFT_RED : battery <= 50 ? TFT_YELLOW : TFT_GREEN;
   const int bodyX = right - 20;
+  M5.Display.setTextFont(1);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(color, TFT_BLACK);
+  M5.Display.drawString(String(battery) + "%", bodyX - 24, top);
   M5.Display.drawRect(bodyX, top, 16, 8, color);
   M5.Display.fillRect(bodyX + 16, top + 2, 2, 4, color);
   const int fillWidth = battery * 12 / 100;
@@ -922,8 +926,8 @@ void drawRadar() {
                     cosf(toRadians(planes[i].latitude)),
                   toRadians(planes[i].latitude - settings.latitude));
     const float radial = min(planes[i].distanceKm / settings.rangeKm, 1.0f) * radius;
-    const int x = centerX + cosf(bearing) * radial;
-    const int y = centerY + sinf(bearing) * radial;
+    const int x = centerX + sinf(bearing) * radial;
+    const int y = centerY - cosf(bearing) * radial;
     gfx.fillCircle(x, y, i == selectedPlane ? 4 : 2,
                 i == selectedPlane ? TFT_YELLOW : TFT_RED);
     if (i == selectedPlane && planes[i].heading >= 0.0f && planes[i].heading < 360.0f) {
