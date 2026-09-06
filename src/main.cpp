@@ -203,6 +203,7 @@ String planeDetailsTicker(const Plane &plane) {
 void drawBatteryIndicator(int right, int top) {
   const int battery = constrain((int)M5.Power.getBatteryLevel(), 0, 100);
   const uint16_t color = battery <= 20 ? TFT_RED : battery <= 50 ? TFT_YELLOW : TFT_GREEN;
+  const bool charging = M5.Power.isCharging() == m5::Power_Class::is_charging;
   const int bodyX = right - 20;
   M5.Display.setTextFont(1);
   M5.Display.setTextSize(1);
@@ -212,6 +213,11 @@ void drawBatteryIndicator(int right, int top) {
   M5.Display.fillRect(bodyX + 16, top + 2, 2, 4, color);
   const int fillWidth = battery * 12 / 100;
   if (fillWidth > 0) M5.Display.fillRect(bodyX + 2, top + 2, fillWidth, 4, color);
+  if (charging) {
+    M5.Display.drawLine(bodyX + 7, top + 1, bodyX + 5, top + 4, TFT_WHITE);
+    M5.Display.drawLine(bodyX + 5, top + 4, bodyX + 8, top + 4, TFT_WHITE);
+    M5.Display.drawLine(bodyX + 8, top + 4, bodyX + 6, top + 7, TFT_WHITE);
+  }
 }
 
 void updateAutoRotation() {
