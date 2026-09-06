@@ -73,6 +73,14 @@ bool webUiNeedsRedraw = true;
 bool trackerPaused = false;
 uint8_t latestUpdateBuffer[4096];
 
+// Off-screen framebuffer used to draw the radar without visible flicker.
+// All primitives are rendered into the sprite, then pushed in one transfer.
+M5Canvas radarCanvas(&M5.Display);
+bool radarCanvasReady = false;
+int radarCanvasWidth = 0;
+int radarCanvasHeight = 0;
+int radarCanvasRotation = -1;
+
 void fetchPlanes();
 void connectWifi();
 void exitToMenu();
@@ -90,7 +98,10 @@ constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
 constexpr char GITHUB_LATEST_RELEASE_URL[] = "https://api.github.com/repos/iitazz/StickS3-Plane-Tracker/releases/latest";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.1.2";
+constexpr char FIRMWARE_VERSION[] = "1.1.3";
+constexpr uint8_t LATEST_UPDATE_MAX_ATTEMPTS = 4;
+constexpr int LATEST_UPDATE_TIMEOUT_MS = 30000;
+constexpr unsigned long LATEST_UPDATE_RETRY_DELAY_MS = 1500;
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -103,7 +114,7 @@ dt{color:#8cff9b;margin-top:10px}dd{margin:3px 0 0 0;color:#fff}button{backgroun
 <section><h2>Wi-Fi setup</h2><form action="/api/wifi" method="post"><label>Found networks <select id="wifiNetworks"><option value="">Scan for networks</option></select></label><button id="wifiScanButton" type="button" onclick="scanWifi()">Scan networks</button> <span id="wifiScanStatus"></span><br><label>Network <input id="wifiSsid" name="ssid" maxlength="32" required></label><label>Password <input name="password" type="password" maxlength="64"></label><br><button type="submit">Save Wi-Fi and reboot</button></form></section>
 <section><h2>Firmware update</h2><form id="firmwareForm" action="/api/update" method="post" enctype="multipart/form-data"><input name="firmware" type="file" accept=".bin,application/octet-stream" required><br><button id="firmwareButton" type="submit">Upload firmware and install</button> <span id="firmwareStatus"></span></form><button id="latestFirmwareButton" type="button">Install latest GitHub release</button> <span id="latestFirmwareStatus"></span></section>
 <script>const firmwareForm=document.querySelector('#firmwareForm');firmwareForm.addEventListener('submit',async event=>{event.preventDefault();const button=document.querySelector('#firmwareButton');const status=document.querySelector('#firmwareStatus');button.disabled=true;button.textContent='Uploading...';status.textContent='Uploading firmware; do not disconnect';try{const response=await fetch(firmwareForm.action,{method:'POST',body:new FormData(firmwareForm)});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent='Update ready. Press BLUE on the device to reboot.'}catch(error){status.textContent=error.message.startsWith('Firmware update failed')?error.message:'Upload connection lost; check the device screen'}finally{button.disabled=false;button.textContent='Upload firmware and install'}});</script>
-<script>document.querySelector('#latestFirmwareButton').addEventListener('click',async()=>{const button=document.querySelector('#latestFirmwareButton');const status=document.querySelector('#latestFirmwareStatus');button.disabled=true;status.textContent='Downloading latest GitHub release; do not disconnect';try{const response=await fetch('/api/update-latest',{method:'POST'});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent=message}catch(error){status.textContent=error.message}finally{button.disabled=false}});</script>
+<script>document.querySelector('#latestFirmwareButton').addEventListener('click',async()=>{const button=document.querySelector('#latestFirmwareButton');const status=document.querySelector('#latestFirmwareStatus');button.disabled=true;status.textContent='Downloading latest GitHub release (retries automatically; can take a few minutes); do not disconnect';try{const response=await fetch('/api/update-latest',{method:'POST'});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent=message}catch(error){status.textContent=error.message}finally{button.disabled=false}});</script>
 <script>async function scanWifi(){const select=document.querySelector('#wifiNetworks');const button=document.querySelector('#wifiScanButton');const status=document.querySelector('#wifiScanStatus');button.disabled=true;button.textContent='Scanning...';status.textContent='Scanning nearby networks';select.innerHTML='<option value="">Scanning...</option>';try{const r=await fetch('/api/wifi/scan');if(!r.ok)throw new Error(await r.text());const networks=await r.json();select.innerHTML='<option value="">Select a network</option>';for(const network of networks){const option=document.createElement('option');option.value=network.ssid;option.textContent=network.ssid+' ('+network.rssi+' dBm)';select.appendChild(option)}if(!networks.length){select.innerHTML='<option value="">No networks found</option>';status.textContent='Scan finished: no networks found'}else status.textContent='Scan finished: '+networks.length+' network'+(networks.length===1?'':'s')}catch(error){select.innerHTML='<option value="">Scan failed</option>';status.textContent='Scan failed';alert(error.message)}finally{button.disabled=false;button.textContent='Scan networks'}}document.querySelector('#wifiNetworks').addEventListener('change',event=>{if(event.target.value)document.querySelector('#wifiSsid').value=event.target.value});let configDirty=false;const configForm=document.querySelector('form[action="/api/config"]');const airportPreset=document.querySelector('#airportPreset');configForm.addEventListener('input',()=>configDirty=true);airportPreset.addEventListener('change',()=>{const option=airportPreset.selectedOptions[0];if(option.value){document.querySelector('[name=airport]').value=option.value;document.querySelector('[name=latitude]').value=option.dataset.lat;document.querySelector('[name=longitude]').value=option.dataset.lon}configDirty=true});async function load(){const r=await fetch('/api/status');const d=await r.json();document.querySelector('#firmwareVersion').textContent='FW v'+d.firmwareVersion;if(!configDirty){for(const k of ['airport','latitude','longitude','rangeKm','refreshSeconds']){const e=document.querySelector('[name='+({rangeKm:'range',refreshSeconds:'refresh'}[k]||k)+']');if(e)e.value=d[k]}const matchingPreset=[...airportPreset.options].find(option=>option.value===d.airport&&Math.abs(Number(option.dataset.lat)-Number(d.latitude))<0.0001&&Math.abs(Number(option.dataset.lon)-Number(d.longitude))<0.0001);airportPreset.value=matchingPreset?d.airport:'';document.querySelector('[name=autorotate]').checked=!!d.autoRotate}let out='';for(const [k,v] of Object.entries(d)){out+='<dt>'+k+'</dt><dd>'+String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</dd>'}document.querySelector('#data').innerHTML=out}load();setInterval(load,5000)</script>
 </body></html>
 )rawliteral";
@@ -457,6 +468,117 @@ void handleUpdateSave() {
   lastUpdateResult = "update ready; press device button";
 }
 
+// Downloads a release asset with retries, Wi-Fi recovery and HTTP Range resume
+// so a dropped connection continues from the last written byte instead of failing.
+void downloadLatestFirmware(const String &assetUrl) {
+  long expectedTotal = -1;
+  bool updateBegun = false;
+  unsigned long retryDelayMs = LATEST_UPDATE_RETRY_DELAY_MS;
+
+  for (uint8_t attempt = 1; attempt <= LATEST_UPDATE_MAX_ATTEMPTS && !updateFailed; attempt++) {
+    if (WiFi.status() != WL_CONNECTED) {
+      lastUpdateResult = "Wi-Fi lost; reconnecting";
+      connectWifi();
+      if (WiFi.status() != WL_CONNECTED) {
+        updateFailure = "Wi-Fi lost during download";
+        updateFailed = true;
+        break;
+      }
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient firmware;
+    firmware.setTimeout(LATEST_UPDATE_TIMEOUT_MS);
+    firmware.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    firmware.setReuse(false);
+    if (!firmware.begin(client, assetUrl)) {
+      updateFailure = "Could not start GitHub firmware download";
+      updateFailed = true;
+      break;
+    }
+    firmware.addHeader("User-Agent", "StickS3-Plane-Tracker");
+    firmware.addHeader("Accept", "application/octet-stream");
+    if (updateBytesWritten > 0) {
+      firmware.addHeader("Range", "bytes=" + String(updateBytesWritten) + "-");
+    }
+
+    const int firmwareResult = firmware.GET();
+    if (firmwareResult != HTTP_CODE_OK && firmwareResult != HTTP_CODE_PARTIAL_CONTENT) {
+      updateFailure = "GitHub firmware download failed: " + firmware.errorToString(firmwareResult);
+      firmware.end();
+      if (firmwareResult > 0 && firmwareResult < 500 && firmwareResult != 429) break;  // permanent error; retrying is pointless
+      delay(retryDelayMs);
+      retryDelayMs *= 2;
+      continue;
+    }
+
+    // A 200 reply to a resumed request means the stream restarted from byte 0.
+    if (firmwareResult == HTTP_CODE_OK && updateBytesWritten > 0) {
+      Update.abort();
+      updateBegun = false;
+      updateBytesWritten = 0;
+    }
+
+    if (!updateBegun) {
+      const int remaining = firmware.getSize();
+      expectedTotal = remaining > 0 ? (long)(updateBytesWritten + remaining) : -1;
+      updateBegun = Update.begin(expectedTotal > 0 ? (size_t)expectedTotal : UPDATE_SIZE_UNKNOWN, U_FLASH);
+      if (!updateBegun) {
+        updateFailure = Update.errorString();
+        updateFailed = true;
+        firmware.end();
+        break;
+      }
+    }
+
+    Stream &stream = firmware.getStream();
+    while (firmware.connected() && (expectedTotal < 0 || updateBytesWritten < (size_t)expectedTotal)) {
+      const size_t requested = expectedTotal < 0 ? sizeof(latestUpdateBuffer) : min(sizeof(latestUpdateBuffer), (size_t)expectedTotal - updateBytesWritten);
+      const size_t read = stream.readBytes(latestUpdateBuffer, requested);
+      if (read == 0) break;  // stalled; retry on a fresh connection with Range resume
+      if (updateBytesWritten == 0 && latestUpdateBuffer[0] != 0xE9) {
+        updateFailure = "Downloaded file is not an ESP32 firmware image";
+        updateFailed = true;
+        break;
+      }
+      const size_t written = Update.write(latestUpdateBuffer, read);
+      updateBytesWritten += written;
+      if (written != read) {
+        updateFailure = Update.errorString();
+        updateFailed = true;
+        break;
+      }
+      if (updateBytesWritten - lastUpdateScreenBytes >= 65536) {
+        drawFirmwareUpdate();
+        lastUpdateScreenBytes = updateBytesWritten;
+      }
+    }
+    firmware.end();
+
+    if (updateFailed) break;
+    if (expectedTotal > 0 && updateBytesWritten < (size_t)expectedTotal) {
+      lastUpdateResult = "connection dropped at " + String(updateBytesWritten) + " bytes; resuming";
+      delay(retryDelayMs);
+      retryDelayMs *= 2;
+      continue;
+    }
+    if (expectedTotal < 0 && updateBytesWritten == 0) {
+      updateFailure = "GitHub firmware download was empty";
+      updateFailed = true;
+      break;
+    }
+    if (!Update.end(true)) {
+      updateFailure = Update.errorString();
+      updateFailed = true;
+    }
+    updateBegun = false;
+    break;
+  }
+
+  if (updateBegun && updateFailed) Update.abort();
+}
+
 void handleLatestUpdate() {
   connectWifi();
   if (provisioningMode || WiFi.status() != WL_CONNECTED) {
@@ -464,26 +586,30 @@ void handleLatestUpdate() {
     return;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient api;
-  api.setTimeout(15000);
-  api.begin(client, GITHUB_LATEST_RELEASE_URL);
-  api.addHeader("Accept", "application/vnd.github+json");
-  api.addHeader("User-Agent", "StickS3-Plane-Tracker");
-  const int apiResult = api.GET();
-  if (apiResult != HTTP_CODE_OK) {
-    const String error = api.errorToString(apiResult);
-    api.end();
-    webServer.send(502, "text/plain", "GitHub release lookup failed: " + error);
-    return;
-  }
-
   JsonDocument release;
-  const DeserializationError parseError = deserializeJson(release, api.getStream());
-  api.end();
-  if (parseError) {
-    webServer.send(502, "text/plain", "Invalid GitHub release response");
+  String apiError = "no response";
+  bool releaseOk = false;
+  for (uint8_t attempt = 1; attempt <= 2 && !releaseOk; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient api;
+    api.setTimeout(15000);
+    api.begin(client, GITHUB_LATEST_RELEASE_URL);
+    api.addHeader("Accept", "application/vnd.github+json");
+    api.addHeader("User-Agent", "StickS3-Plane-Tracker");
+    const int apiResult = api.GET();
+    if (apiResult == HTTP_CODE_OK) {
+      const DeserializationError parseError = deserializeJson(release, api.getStream());
+      releaseOk = !parseError;
+      if (parseError) apiError = "invalid release response";
+    } else {
+      apiError = api.errorToString(apiResult);
+    }
+    api.end();
+    if (!releaseOk && attempt < 2) delay(1000);
+  }
+  if (!releaseOk) {
+    webServer.send(502, "text/plain", "GitHub release lookup failed: " + apiError);
     return;
   }
 
@@ -514,68 +640,10 @@ void handleLatestUpdate() {
   lastUpdateResult = "downloading " + assetName;
   drawFirmwareUpdate();
 
-  HTTPClient firmware;
-  firmware.setTimeout(15000);
-  firmware.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  firmware.begin(client, assetUrl);
-  firmware.addHeader("User-Agent", "StickS3-Plane-Tracker");
-  const int firmwareResult = firmware.GET();
-  if (firmwareResult != HTTP_CODE_OK) {
-    updateFailure = "GitHub firmware download failed: " + firmware.errorToString(firmwareResult);
-    firmware.end();
-    updateFailed = true;
-    updateInProgress = false;
-    updateScreenError = true;
-    updateScreenNeedsRedraw = true;
-    appMode = MODE_FIRMWARE_UPDATE;
-    updateButtonIgnoreUntil = millis() + 1500;
-    drawFirmwareUpdate();
-    webServer.send(502, "text/plain", updateFailure);
-    return;
-  }
-
-  const int contentLength = firmware.getSize();
-  updateFailed = !Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN, U_FLASH);
-  if (updateFailed) {
-    updateFailure = Update.errorString();
-  } else {
-    Stream &stream = firmware.getStream();
-    while (firmware.connected() && (contentLength < 0 || updateBytesWritten < (size_t)contentLength)) {
-      const size_t requested = contentLength < 0 ? sizeof(latestUpdateBuffer) : min(sizeof(latestUpdateBuffer), (size_t)contentLength - updateBytesWritten);
-      const size_t read = stream.readBytes(latestUpdateBuffer, requested);
-      if (read == 0) break;
-      if (updateBytesWritten == 0 && latestUpdateBuffer[0] != 0xE9) {
-        updateFailure = "Downloaded file is not an ESP32 firmware image";
-        updateFailed = true;
-        Update.abort();
-        break;
-      }
-      const size_t written = Update.write(latestUpdateBuffer, read);
-      updateBytesWritten += written;
-      if (written != read) {
-        updateFailure = Update.errorString();
-        updateFailed = true;
-        break;
-      }
-      if (updateBytesWritten - lastUpdateScreenBytes >= 65536) {
-        drawFirmwareUpdate();
-        lastUpdateScreenBytes = updateBytesWritten;
-      }
-    }
-    if (!updateFailed && (updateBytesWritten == 0 || (contentLength > 0 && updateBytesWritten != (size_t)contentLength))) {
-      updateFailure = "GitHub firmware download was incomplete";
-      updateFailed = true;
-    }
-    if (!updateFailed && !Update.end(true)) {
-      updateFailure = Update.errorString();
-      updateFailed = true;
-    }
-  }
-  firmware.end();
+  downloadLatestFirmware(assetUrl);
 
   updateInProgress = false;
   if (updateFailed) {
-    Update.abort();
     updateReady = false;
     updateScreenError = true;
     updateScreenNeedsRedraw = true;
@@ -775,9 +843,38 @@ void fetchPlanes() {
   fetchSelectedRoute();
 }
 
-void drawRadar() {
+// Ensures the sprite exists and matches the current display size/rotation.
+// The canvas is recreated when the auto-rotate feature changes orientation.
+bool ensureRadarCanvas() {
   const int width = M5.Display.width();
   const int height = M5.Display.height();
+  const int rotation = M5.Display.getRotation();
+  if (radarCanvasReady && width == radarCanvasWidth && height == radarCanvasHeight &&
+      rotation == radarCanvasRotation) {
+    return true;
+  }
+  radarCanvas.deleteSprite();
+  radarCanvas.setPsram(true);  // framebuffer lives in PSRAM, not scarce internal RAM
+  radarCanvas.setColorDepth(16);
+  if (radarCanvas.createSprite(width, height) == nullptr) {
+    radarCanvasReady = false;
+    return false;
+  }
+  radarCanvas.setTextFont(2);
+  radarCanvas.setTextSize(1);
+  radarCanvas.setTextWrap(false);
+  radarCanvasWidth = width;
+  radarCanvasHeight = height;
+  radarCanvasRotation = rotation;
+  radarCanvasReady = true;
+  return true;
+}
+
+void drawRadar() {
+  if (!ensureRadarCanvas()) return;
+  M5Canvas &gfx = radarCanvas;
+  const int width = radarCanvasWidth;
+  const int height = radarCanvasHeight;
   const int infoWidth = min(104, width / 2);
   const int radarWidth = width - infoWidth;
   const int radius = min(height / 2 - 12, radarWidth / 2 - 6);
@@ -785,41 +882,40 @@ void drawRadar() {
   const int centerY = height / 2;
   const int infoX = radarWidth + 4;
 
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
-  M5.Display.drawLine(radarWidth, 0, radarWidth, height, TFT_DARKGREEN);
-  drawBatteryIndicator(radarWidth - 4, 5);
+  gfx.fillScreen(TFT_BLACK);
+  gfx.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
+  gfx.drawLine(radarWidth, 0, radarWidth, height, TFT_DARKGREEN);
 
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString(scrollingText(settings.airport + " " + (trackerPaused ? "PAUSED" : statusText), 15), infoX, 3);
+  gfx.setTextSize(1);
+  gfx.setTextColor(TFT_CYAN, TFT_BLACK);
+  gfx.drawString(scrollingText(settings.airport + " " + (trackerPaused ? "PAUSED" : statusText), 15), infoX, 3);
 
   if (planeCount > 0) {
     const Plane &plane = planes[selectedPlane];
     const String callsign = plane.callsign.length() ? plane.callsign : "UNKNOWN";
 
-    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    M5.Display.drawString(scrollingText(callsign, 12), infoX, 20);
-    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    M5.Display.drawString("#" + String(selectedPlane + 1) + "/" + String(planeCount), infoX, 36);
-    M5.Display.drawString("DST " + String(plane.distanceKm, 1) + " km", infoX, 52);
-    M5.Display.drawString("ALT " + String(plane.altitudeMeters < 0 ? 0 : plane.altitudeMeters, 0) + " m", infoX, 68);
-    M5.Display.drawString("SPD " + String(plane.speedKmh < 0 ? 0 : plane.speedKmh, 0) + " km/h", infoX, 84);
-    M5.Display.drawString("HDG " + String(plane.heading < 0 ? 0 : plane.heading, 0) + " deg", infoX, 100);
-    M5.Display.drawString(scrollingText(planeDetailsTicker(plane), 15), infoX, 116);
+    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+    gfx.drawString(scrollingText(callsign, 12), infoX, 20);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.drawString("#" + String(selectedPlane + 1) + "/" + String(planeCount), infoX, 36);
+    gfx.drawString("DST " + String(plane.distanceKm, 1) + " km", infoX, 52);
+    gfx.drawString("ALT " + String(plane.altitudeMeters < 0 ? 0 : plane.altitudeMeters, 0) + " m", infoX, 68);
+    gfx.drawString("SPD " + String(plane.speedKmh < 0 ? 0 : plane.speedKmh, 0) + " km/h", infoX, 84);
+    gfx.drawString("HDG " + String(plane.heading < 0 ? 0 : plane.heading, 0) + " deg", infoX, 100);
+    gfx.drawString(scrollingText(planeDetailsTicker(plane), 15), infoX, 116);
   } else {
-    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    M5.Display.drawString("No aircraft", infoX, 28);
-    M5.Display.drawString("BLUE SELECT", infoX, 48);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.drawString("No aircraft", infoX, 28);
+    gfx.drawString("BLUE SELECT", infoX, 48);
   }
 
-  M5.Display.drawCircle(centerX, centerY, radius, TFT_DARKGREEN);
-  M5.Display.drawCircle(centerX, centerY, radius * 2 / 3, TFT_DARKGREEN);
-  M5.Display.drawCircle(centerX, centerY, radius / 3, TFT_DARKGREEN);
-  M5.Display.drawLine(centerX - radius, centerY, centerX + radius, centerY, TFT_DARKGREEN);
-  M5.Display.drawLine(centerX, centerY - radius, centerX, centerY + radius, TFT_DARKGREEN);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString(String(settings.rangeKm, 0) + " km", 4, 2);
+  gfx.drawCircle(centerX, centerY, radius, TFT_DARKGREEN);
+  gfx.drawCircle(centerX, centerY, radius * 2 / 3, TFT_DARKGREEN);
+  gfx.drawCircle(centerX, centerY, radius / 3, TFT_DARKGREEN);
+  gfx.drawLine(centerX - radius, centerY, centerX + radius, centerY, TFT_DARKGREEN);
+  gfx.drawLine(centerX, centerY - radius, centerX, centerY + radius, TFT_DARKGREEN);
+  gfx.setTextColor(TFT_CYAN, TFT_BLACK);
+  gfx.drawString(String(settings.rangeKm, 0) + " km", 4, 2);
 
   for (size_t i = 0; i < planeCount; ++i) {
     const float bearing = atan2f(toRadians(planes[i].longitude - settings.longitude) *
@@ -828,7 +924,7 @@ void drawRadar() {
     const float radial = min(planes[i].distanceKm / settings.rangeKm, 1.0f) * radius;
     const int x = centerX + cosf(bearing) * radial;
     const int y = centerY + sinf(bearing) * radial;
-    M5.Display.fillCircle(x, y, i == selectedPlane ? 4 : 2,
+    gfx.fillCircle(x, y, i == selectedPlane ? 4 : 2,
                 i == selectedPlane ? TFT_YELLOW : TFT_RED);
     if (i == selectedPlane && planes[i].heading >= 0.0f && planes[i].heading < 360.0f) {
       const float headingRadians = toRadians(planes[i].heading - 90.0f);
@@ -836,15 +932,21 @@ void drawRadar() {
       const int lineStartY = y + sinf(headingRadians) * 5;
       const int lineEndX = x + cosf(headingRadians) * 11;
       const int lineEndY = y + sinf(headingRadians) * 11;
-      M5.Display.drawLine(lineStartX, lineStartY, lineEndX, lineEndY, TFT_YELLOW);
+      gfx.drawLine(lineStartX, lineStartY, lineEndX, lineEndY, TFT_YELLOW);
     }
   }
 
   const float sweepRadians = toRadians(sweepAngle);
-  M5.Display.drawLine(centerX, centerY, centerX + cosf(sweepRadians) * radius,
+  gfx.drawLine(centerX, centerY, centerX + cosf(sweepRadians) * radius,
                       centerY + sinf(sweepRadians) * radius, TFT_GREEN);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.setTextSize(1);
+  gfx.setTextColor(TFT_CYAN, TFT_BLACK);
+  gfx.setTextSize(1);
+
+  // Push the finished frame to the panel in one transfer; no visible erase.
+  M5.Display.startWrite();
+  radarCanvas.pushSprite(0, 0);
+  M5.Display.endWrite();
+  drawBatteryIndicator(radarWidth - 4, 5);
 }
 
 void drawIpOverlay() {
