@@ -830,6 +830,14 @@ void drawRadar() {
     const int y = centerY + sinf(bearing) * radial;
     M5.Display.fillCircle(x, y, i == selectedPlane ? 4 : 2,
                 i == selectedPlane ? TFT_YELLOW : TFT_RED);
+    if (i == selectedPlane && planes[i].heading >= 0.0f && planes[i].heading < 360.0f) {
+      const float headingRadians = toRadians(planes[i].heading - 90.0f);
+      const int lineStartX = x + cosf(headingRadians) * 5;
+      const int lineStartY = y + sinf(headingRadians) * 5;
+      const int lineEndX = x + cosf(headingRadians) * 11;
+      const int lineEndY = y + sinf(headingRadians) * 11;
+      M5.Display.drawLine(lineStartX, lineStartY, lineEndX, lineEndY, TFT_YELLOW);
+    }
   }
 
   const float sweepRadians = toRadians(sweepAngle);
