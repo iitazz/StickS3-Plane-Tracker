@@ -2,7 +2,6 @@
 #include <ArduinoJson.h>
 #include <esp_ota_ops.h>
 #include <HTTPClient.h>
-#include <M5Unified.h>
 #include <Preferences.h>
 #include <Update.h>
 #include <WiFi.h>
@@ -10,6 +9,7 @@
 #include <WebServer.h>
 
 #include "config.h"
+#include "hal.h"
 
 struct Plane {
   String icao24;
@@ -30,7 +30,12 @@ struct TrackerSettings {
   float rangeKm;
   unsigned long refreshIntervalMs;
   bool autoRotate;
+  String openSkyClientId;
+  String openSkyClientSecret;
 };
+
+String cachedOAuthToken = "";
+unsigned long oauthTokenExpiresAt = 0;
 
 enum AppMode { MODE_MENU, MODE_TRACKER, MODE_FIRMWARE_UPDATE };
 
@@ -75,7 +80,7 @@ uint8_t latestUpdateBuffer[4096];
 
 // Off-screen framebuffer used to draw the radar without visible flicker.
 // All primitives are rendered into the sprite, then pushed in one transfer.
-M5Canvas radarCanvas(&M5.Display);
+halCanvas radarCanvas(&halDisplay);
 bool radarCanvasReady = false;
 int radarCanvasWidth = 0;
 int radarCanvasHeight = 0;
@@ -86,37 +91,170 @@ void connectWifi();
 void exitToMenu();
 void drawFirmwareUpdate();
 
-// Centralized physical control mapping for every app mode.
-// M5.BtnB is the top button; M5.BtnA is the blue button beside the display.
-bool controlNext() { return M5.BtnB.wasSingleClicked(); }
-bool controlSelect() { return M5.BtnA.wasSingleClicked(); }
-bool controlPrevious() { return M5.BtnB.wasDoubleClicked(); }
-bool controlExit() { return M5.BtnB.wasHold(); }
-bool controlShowIp() { return M5.BtnA.wasHold(); }
-
 constexpr char ROUTE_URL_PREFIX[] = "https://api.adsbdb.com/v0/callsign/";
 constexpr char GITHUB_LATEST_RELEASE_URL[] = "https://api.github.com/repos/iitazz/StickS3-Plane-Tracker/releases/latest";
 constexpr char SETUP_AP_NAME[] = "PlaneTracker-Setup";
 constexpr char SETUP_AP_PASSWORD[] = "planeconfig";
-constexpr char FIRMWARE_VERSION[] = "1.1.3";
+constexpr char FIRMWARE_VERSION[] = "1.2.0";
 constexpr uint8_t LATEST_UPDATE_MAX_ATTEMPTS = 4;
 constexpr int LATEST_UPDATE_TIMEOUT_MS = 30000;
 constexpr unsigned long LATEST_UPDATE_RETRY_DELAY_MS = 1500;
 
 constexpr char DEBUG_PAGE[] = R"rawliteral(
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Plane Tracker</title><style>
 body{font:16px monospace;background:#101512;color:#d7ffe0;max-width:900px;margin:24px auto;padding:0 16px}
 h1{color:#50e0ff;font-size:22px}section{border:1px solid #276b3c;padding:14px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
-dt{color:#8cff9b;margin-top:10px}dd{margin:3px 0 0 0;color:#fff}button{background:#194d2a;color:#fff;border:1px solid #56d878;padding:9px 14px;margin-top:12px}input{background:#17221a;color:#fff;border:1px solid #4c9d61;padding:8px;width:130px}label{display:inline-block;margin:7px 12px 7px 0}
-</style></head><body><h1>Plane Tracker <small id="firmwareVersion"></small></h1><section><form action="/api/config" method="post">
-<label>Airport preset <select id="airportPreset"><option value="">Manual coordinates</option><option value="FCO" data-lat="41.8003" data-lon="12.2389">FCO - Rome</option><option value="LHR" data-lat="51.4700" data-lon="-0.4543">LHR - London</option><option value="CDG" data-lat="49.0097" data-lon="2.5479">CDG - Paris</option><option value="AMS" data-lat="52.3086" data-lon="4.7639">AMS - Amsterdam</option><option value="FRA" data-lat="50.0379" data-lon="8.5622">FRA - Frankfurt</option><option value="MAD" data-lat="40.4983" data-lon="-3.5676">MAD - Madrid</option><option value="JFK" data-lat="40.6413" data-lon="-73.7781">JFK - New York</option><option value="LAX" data-lat="33.9416" data-lon="-118.4085">LAX - Los Angeles</option><option value="ORD" data-lat="41.9742" data-lon="-87.9073">ORD - Chicago</option><option value="DXB" data-lat="25.2532" data-lon="55.3657">DXB - Dubai</option><option value="HND" data-lat="35.5494" data-lon="139.7798">HND - Tokyo</option><option value="SIN" data-lat="1.3644" data-lon="103.9915">SIN - Singapore</option></select></label><label>Airport <input name="airport" maxlength="12"></label><label>Latitude <input name="latitude" type="number" step="0.0001"></label><label>Longitude <input name="longitude" type="number" step="0.0001"></label><label>Radar range km <input name="range" type="number" min="5" max="500" step="1"></label><label>Refresh sec <input name="refresh" type="number" min="10" max="3600" step="1"></label><label>Auto rotate <input name="autorotate" type="checkbox"></label><br><button type="submit">Save and refresh</button></form></section><section><button onclick="load()">Refresh diagnostics</button><dl id="data">Loading...</dl></section>
+dt{color:#8cff9b;margin-top:10px}dd{margin:3px 0 0 0;color:#fff}button{background:#194d2a;color:#fff;border:1px solid #56d878;padding:9px 14px;margin-top:12px;cursor:pointer}input{background:#17221a;color:#fff;border:1px solid #4c9d61;padding:8px;width:130px}label{display:inline-block;margin:7px 12px 7px 0}
+.info-box{font-size:12px;color:#8cff9b;background:#14291c;border-left:3px solid #50e0ff;padding:10px 14px;margin:12px 0;line-height:1.5}
+.btn-danger{background:#5a1e1e!important;border:1px solid #e04444!important;color:#ffcaca!important}
+</style></head><body><h1>Plane Tracker <small id="firmwareVersion"></small></h1>
+<section><form action="/api/config" method="post">
+<label>Airport preset <select id="airportPreset"><option value="">Manual coordinates</option><option value="FCO" data-lat="41.8003" data-lon="12.2389">FCO - Rome</option><option value="LHR" data-lat="51.4700" data-lon="-0.4543">LHR - London</option><option value="CDG" data-lat="49.0097" data-lon="2.5479">CDG - Paris</option><option value="AMS" data-lat="52.3086" data-lon="4.7639">AMS - Amsterdam</option><option value="FRA" data-lat="50.0379" data-lon="8.5622">FRA - Frankfurt</option><option value="MAD" data-lat="40.4983" data-lon="-3.5676">MAD - Madrid</option><option value="JFK" data-lat="40.6413" data-lon="-73.7781">JFK - New York</option><option value="LAX" data-lat="33.9416" data-lon="-118.4085">LAX - Los Angeles</option><option value="ORD" data-lat="41.9742" data-lon="-87.9073">ORD - Chicago</option><option value="DXB" data-lat="25.2532" data-lon="55.3657">DXB - Dubai</option><option value="HND" data-lat="35.5494" data-lon="139.7798">HND - Tokyo</option><option value="SIN" data-lat="1.3644" data-lon="103.9915">SIN - Singapore</option></select></label><label>Airport <input name="airport" maxlength="12"></label><label>Latitude <input name="latitude" type="number" step="0.0001"></label><label>Longitude <input name="longitude" type="number" step="0.0001"></label><label>Radar range km <input name="range" type="number" min="5" max="500" step="1"></label><label>Refresh sec <input name="refresh" type="number" min="10" max="3600" step="1"></label><label>Auto rotate <input name="autorotate" type="checkbox"></label><br><label>OpenSky Client ID <input name="opensky_id" maxlength="64" placeholder="Optional"></label><label>OpenSky Client Secret <input name="opensky_sec" type="password" maxlength="64" placeholder="Optional"></label> <button type="button" id="clearOpenSkyBtn" class="btn-danger" onclick="clearOpenSky()" style="display:none">Remove Saved Credentials</button><div class="info-box"><b>OpenSky API Credentials (Optional):</b><br>Providing credentials is <b>completely optional</b>. By default, the device uses the public OpenSky API in anonymous mode (400 requests/day limit).<br><br>If you want higher rate limits (up to <b>4,000 requests/day</b> for more frequent updates), create a free account and generate an API Client (<b>Client ID</b> and <b>Client Secret</b>) under your settings as specified in the <a href="https://openskynetwork.github.io/opensky-api/rest.html#authentication" target="_blank" style="color:#50e0ff">OpenSky API Documentation</a>.<br><br><b>On-Device Encryption:</b> Stored credentials are <b>hardware-encrypted</b> on device NVS storage using unique ESP32 silicon eFuse MAC keys. They are <b>never pre-filled</b> in the Web UI, never exposed in status API responses, and cannot be extracted from flash memory.</div><br><button type="submit">Save and refresh</button></form></section>
+<section><button onclick="load()">Refresh diagnostics</button><dl id="data">Loading...</dl></section>
 <section><h2>Wi-Fi setup</h2><form action="/api/wifi" method="post"><label>Found networks <select id="wifiNetworks"><option value="">Scan for networks</option></select></label><button id="wifiScanButton" type="button" onclick="scanWifi()">Scan networks</button> <span id="wifiScanStatus"></span><br><label>Network <input id="wifiSsid" name="ssid" maxlength="32" required></label><label>Password <input name="password" type="password" maxlength="64"></label><br><button type="submit">Save Wi-Fi and reboot</button></form></section>
 <section><h2>Firmware update</h2><form id="firmwareForm" action="/api/update" method="post" enctype="multipart/form-data"><input name="firmware" type="file" accept=".bin,application/octet-stream" required><br><button id="firmwareButton" type="submit">Upload firmware and install</button> <span id="firmwareStatus"></span></form><button id="latestFirmwareButton" type="button">Install latest GitHub release</button> <span id="latestFirmwareStatus"></span></section>
-<script>const firmwareForm=document.querySelector('#firmwareForm');firmwareForm.addEventListener('submit',async event=>{event.preventDefault();const button=document.querySelector('#firmwareButton');const status=document.querySelector('#firmwareStatus');button.disabled=true;button.textContent='Uploading...';status.textContent='Uploading firmware; do not disconnect';try{const response=await fetch(firmwareForm.action,{method:'POST',body:new FormData(firmwareForm)});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent='Update ready. Press BLUE on the device to reboot.'}catch(error){status.textContent=error.message.startsWith('Firmware update failed')?error.message:'Upload connection lost; check the device screen'}finally{button.disabled=false;button.textContent='Upload firmware and install'}});</script>
-<script>document.querySelector('#latestFirmwareButton').addEventListener('click',async()=>{const button=document.querySelector('#latestFirmwareButton');const status=document.querySelector('#latestFirmwareStatus');button.disabled=true;status.textContent='Downloading latest GitHub release (retries automatically; can take a few minutes); do not disconnect';try{const response=await fetch('/api/update-latest',{method:'POST'});const message=await response.text();if(!response.ok)throw new Error(message);status.textContent=message}catch(error){status.textContent=error.message}finally{button.disabled=false}});</script>
-<script>async function scanWifi(){const select=document.querySelector('#wifiNetworks');const button=document.querySelector('#wifiScanButton');const status=document.querySelector('#wifiScanStatus');button.disabled=true;button.textContent='Scanning...';status.textContent='Scanning nearby networks';select.innerHTML='<option value="">Scanning...</option>';try{const r=await fetch('/api/wifi/scan');if(!r.ok)throw new Error(await r.text());const networks=await r.json();select.innerHTML='<option value="">Select a network</option>';for(const network of networks){const option=document.createElement('option');option.value=network.ssid;option.textContent=network.ssid+' ('+network.rssi+' dBm)';select.appendChild(option)}if(!networks.length){select.innerHTML='<option value="">No networks found</option>';status.textContent='Scan finished: no networks found'}else status.textContent='Scan finished: '+networks.length+' network'+(networks.length===1?'':'s')}catch(error){select.innerHTML='<option value="">Scan failed</option>';status.textContent='Scan failed';alert(error.message)}finally{button.disabled=false;button.textContent='Scan networks'}}document.querySelector('#wifiNetworks').addEventListener('change',event=>{if(event.target.value)document.querySelector('#wifiSsid').value=event.target.value});let configDirty=false;const configForm=document.querySelector('form[action="/api/config"]');const airportPreset=document.querySelector('#airportPreset');configForm.addEventListener('input',()=>configDirty=true);airportPreset.addEventListener('change',()=>{const option=airportPreset.selectedOptions[0];if(option.value){document.querySelector('[name=airport]').value=option.value;document.querySelector('[name=latitude]').value=option.dataset.lat;document.querySelector('[name=longitude]').value=option.dataset.lon}configDirty=true});async function load(){const r=await fetch('/api/status');const d=await r.json();document.querySelector('#firmwareVersion').textContent='FW v'+d.firmwareVersion;if(!configDirty){for(const k of ['airport','latitude','longitude','rangeKm','refreshSeconds']){const e=document.querySelector('[name='+({rangeKm:'range',refreshSeconds:'refresh'}[k]||k)+']');if(e)e.value=d[k]}const matchingPreset=[...airportPreset.options].find(option=>option.value===d.airport&&Math.abs(Number(option.dataset.lat)-Number(d.latitude))<0.0001&&Math.abs(Number(option.dataset.lon)-Number(d.longitude))<0.0001);airportPreset.value=matchingPreset?d.airport:'';document.querySelector('[name=autorotate]').checked=!!d.autoRotate}let out='';for(const [k,v] of Object.entries(d)){out+='<dt>'+k+'</dt><dd>'+String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</dd>'}document.querySelector('#data').innerHTML=out}load();setInterval(load,5000)</script>
-</body></html>
+<script>
+const firmwareForm=document.querySelector("#firmwareForm");
+firmwareForm.addEventListener("submit",async event=>{
+  event.preventDefault();
+  const button=document.querySelector("#firmwareButton");
+  const status=document.querySelector("#firmwareStatus");
+  button.disabled=true;
+  button.textContent="Uploading...";
+  status.textContent="Uploading firmware; do not disconnect";
+  try{
+    const response=await fetch(firmwareForm.action,{method:"POST",body:new FormData(firmwareForm)});
+    const message=await response.text();
+    if(!response.ok)throw new Error(message);
+    status.textContent="Update ready. Press BLUE on the device to reboot."
+  }catch(error){
+    status.textContent=error.message.startsWith("Firmware update failed")?error.message:"Upload connection lost; check the device screen"
+  }finally{
+    button.disabled=false;
+    button.textContent="Upload firmware and install"
+  }
+});
+document.querySelector("#latestFirmwareButton").addEventListener("click",async()=>{
+  const button=document.querySelector("#latestFirmwareButton");
+  const status=document.querySelector("#latestFirmwareStatus");
+  button.disabled=true;
+  status.textContent="Downloading latest GitHub release (retries automatically; can take a few minutes); do not disconnect";
+  try{
+    const response=await fetch("/api/update-latest",{method:"POST"});
+    const message=await response.text();
+    if(!response.ok)throw new Error(message);
+    status.textContent=message
+  }catch(error){
+    status.textContent=error.message
+  }finally{
+    button.disabled=false
+  }
+});
+async function scanWifi(){
+  const select=document.querySelector("#wifiNetworks");
+  const button=document.querySelector("#wifiScanButton");
+  const status=document.querySelector("#wifiScanStatus");
+  button.disabled=true;
+  button.textContent="Scanning...";
+  status.textContent="Scanning nearby networks";
+  select.innerHTML='<option value="">Scanning...</option>';
+  try{
+    const r=await fetch("/api/wifi/scan");
+    if(!r.ok)throw new Error(await r.text());
+    const networks=await r.json();
+    select.innerHTML='<option value="">Select a network</option>';
+    for(const network of networks){
+      const option=document.createElement("option");
+      option.value=network.ssid;
+      option.textContent=network.ssid+" ("+network.rssi+" dBm)";
+      select.appendChild(option)
+    }
+    if(!networks.length){
+      select.innerHTML='<option value="">No networks found</option>';
+      status.textContent="Scan finished: no networks found"
+    }else status.textContent="Scan finished: "+networks.length+" network"+(networks.length===1?"":"s")
+  }catch(error){
+    select.innerHTML='<option value="">Scan failed</option>';
+    status.textContent="Scan failed";
+    alert(error.message)
+  }finally{
+    button.disabled=false;
+    button.textContent="Scan networks"
+  }
+}
+document.querySelector("#wifiNetworks").addEventListener("change",event=>{
+  if(event.target.value)document.querySelector("#wifiSsid").value=event.target.value
+});
+let configDirty=false;
+const configForm=document.querySelector('form[action="/api/config"]');
+const airportPreset=document.querySelector("#airportPreset");
+configForm.addEventListener("input",()=>configDirty=true);
+airportPreset.addEventListener("change",()=>{
+  const option=airportPreset.selectedOptions[0];
+  if(option.value){
+    document.querySelector("[name=airport]").value=option.value;
+    document.querySelector("[name=latitude]").value=option.dataset.lat;
+    document.querySelector("[name=longitude]").value=option.dataset.lon
+  }
+  configDirty=true
+});
+async function clearOpenSky(){
+  if(!confirm("Remove saved OpenSky credentials and revert to the Public API?")) return;
+  const body=new URLSearchParams();
+  body.append("clear_opensky","1");
+  body.append("airport",document.querySelector('[name=airport]').value||"FCO");
+  body.append("latitude",document.querySelector('[name=latitude]').value||"41.9028");
+  body.append("longitude",document.querySelector('[name=longitude]').value||"12.4964");
+  body.append("range",document.querySelector('[name=range]').value||"65");
+  body.append("refresh",document.querySelector('[name=refresh]').value||"30");
+  if(document.querySelector('[name=autorotate]').checked) body.append("autorotate","on");
+  const r=await fetch('/api/config',{method:'POST',body:body});
+  if(r.ok){
+    alert("OpenSky credentials removed! Reverted to Public API.");
+    configDirty=false;
+    load();
+  }else{
+    alert("Failed to remove credentials.");
+  }
+}
+async function load(){
+  const r=await fetch("/api/status");
+  const d=await r.json();
+  document.querySelector("#firmwareVersion").textContent="FW v"+d.firmwareVersion;
+  if(!configDirty){
+    for(const k of ["airport","latitude","longitude","rangeKm","refreshSeconds"]){
+      const e=document.querySelector("[name="+({rangeKm:"range",refreshSeconds:"refresh"}[k]||k)+"]");
+      if(e)e.value=d[k]||""
+    }
+    const userEl=document.querySelector("[name=opensky_id]");
+    const secEl=document.querySelector("[name=opensky_sec]");
+    const clearBtn=document.querySelector("#clearOpenSkyBtn");
+    if(userEl&&secEl){
+      userEl.value="";
+      secEl.value="";
+      if(d.hasOpenSkyAuth){
+        userEl.placeholder="Saved & Encrypted on device";
+        secEl.placeholder="Saved & Encrypted on device";
+        if(clearBtn) clearBtn.style.display="inline-block";
+      }else{
+        userEl.placeholder="Optional";
+        secEl.placeholder="Optional";
+        if(clearBtn) clearBtn.style.display="none";
+      }
+    }
+    const matchingPreset=[...airportPreset.options].find(option=>option.value===d.airport&&Math.abs(Number(option.dataset.lat)-Number(d.latitude))<0.0001&&Math.abs(Number(option.dataset.lon)-Number(d.longitude))<0.0001);
+    airportPreset.value=matchingPreset?d.airport:"";
+    document.querySelector("[name=autorotate]").checked=!!d.autoRotate
+  }
+  let out="";
+  for(const [k,v] of Object.entries(d)){
+    out+="<dt>"+k+"</dt><dd>"+String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;")+"</dd>"
+  }
+  document.querySelector("#data").innerHTML=out;
+}
+load();
+</script></body></html>
 )rawliteral";
 
 float toRadians(float degrees) { return degrees * PI / 180.0f; }
@@ -130,6 +268,90 @@ float distanceKm(float lat1, float lon1, float lat2, float lon2) {
   return 6371.0088f * 2.0f * atan2f(sqrtf(a), sqrtf(1.0f - a));
 }
 
+String encryptString(const String &input) {
+  if (input.isEmpty()) return "";
+  uint64_t chipId = ESP.getEfuseMac();
+  uint8_t key[8];
+  memcpy(key, &chipId, 8);
+  String out = "";
+  for (size_t i = 0; i < input.length(); i++) {
+    uint8_t c = (uint8_t)input[i] ^ key[i % 8] ^ (uint8_t)(i * 31 + 0x5A);
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02X", c);
+    out += buf;
+  }
+  return out;
+}
+
+String decryptString(const String &hexInput) {
+  if (hexInput.isEmpty() || hexInput.length() % 2 != 0) return "";
+  uint64_t chipId = ESP.getEfuseMac();
+  uint8_t key[8];
+  memcpy(key, &chipId, 8);
+  String out = "";
+  for (size_t i = 0; i < hexInput.length(); i += 2) {
+    char hex[3] = { hexInput[i], hexInput[i+1], 0 };
+    uint8_t c = (uint8_t)strtol(hex, NULL, 16);
+    size_t pos = i / 2;
+    char original = (char)(c ^ key[pos % 8] ^ (uint8_t)(pos * 31 + 0x5A));
+    out += original;
+  }
+  return out;
+}
+
+String getOpenSkyOAuthToken() {
+  if (settings.openSkyClientId.isEmpty() || settings.openSkyClientSecret.isEmpty()) {
+    return "";
+  }
+  if (cachedOAuthToken.length() > 0 && millis() < oauthTokenExpiresAt) {
+    return cachedOAuthToken;
+  }
+
+  Serial.println("[OpenSky] Requesting OAuth2 client credentials token...");
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(15000);
+  if (!http.begin(client, "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token")) {
+    Serial.println("[OpenSky] OAuth HTTP begin failed");
+    return "";
+  }
+
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  const String payload = "grant_type=client_credentials&client_id=" + settings.openSkyClientId +
+                         "&client_secret=" + settings.openSkyClientSecret;
+  const int code = http.POST(payload);
+
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[OpenSky] OAuth HTTP %d: %s\n", code, http.errorToString(code).c_str());
+    http.end();
+    return "";
+  }
+
+  const String response = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, response);
+  if (error) {
+    Serial.printf("[OpenSky] OAuth JSON parse error: %s\n", error.c_str());
+    return "";
+  }
+
+  const char *token = doc["access_token"];
+  int expiresIn = doc["expires_in"] | 1800;
+  if (!token || strlen(token) == 0) {
+    Serial.println("[OpenSky] OAuth response missing access_token");
+    return "";
+  }
+
+  cachedOAuthToken = String(token);
+  const unsigned long marginMs = (expiresIn > 60 ? (expiresIn - 30) : 30) * 1000UL;
+  oauthTokenExpiresAt = millis() + marginMs;
+  Serial.printf("[OpenSky] OAuth token acquired (expires in %d sec)\n", expiresIn);
+  return cachedOAuthToken;
+}
+
 void loadSettings() {
   Preferences preferences;
   preferences.begin("plane-tracker", true);
@@ -140,6 +362,21 @@ void loadSettings() {
   settings.rangeKm = preferences.getFloat("range", RADAR_RANGE_KM);
   settings.refreshIntervalMs = preferences.getULong("refresh", REFRESH_INTERVAL_MS);
   settings.autoRotate = preferences.getBool("autorotate", AUTO_ROTATE_DEFAULT);
+  settings.openSkyClientId = preferences.getString("opensky_id", "");
+  if (settings.openSkyClientId.isEmpty()) {
+    settings.openSkyClientId = preferences.getString("opensky_user", "");
+  }
+  String encSec = preferences.getString("opensky_encsec", "");
+  if (encSec.length() > 0) {
+    settings.openSkyClientSecret = decryptString(encSec);
+  } else {
+    String oldEncPass = preferences.getString("opensky_enc", "");
+    if (oldEncPass.length() > 0) {
+      settings.openSkyClientSecret = decryptString(oldEncPass);
+    } else {
+      settings.openSkyClientSecret = preferences.getString("opensky_pass", "");
+    }
+  }
   lastUpdateResult = preferences.getString("lastUpdate", "idle");
   preferences.end();
 }
@@ -153,6 +390,19 @@ void saveSettings() {
   preferences.putFloat("range", settings.rangeKm);
   preferences.putULong("refresh", settings.refreshIntervalMs);
   preferences.putBool("autorotate", settings.autoRotate);
+  if (settings.openSkyClientId.length() > 0) {
+    preferences.putString("opensky_id", settings.openSkyClientId);
+  } else {
+    preferences.remove("opensky_id");
+  }
+  if (settings.openSkyClientSecret.length() > 0) {
+    preferences.putString("opensky_encsec", encryptString(settings.openSkyClientSecret));
+  } else {
+    preferences.remove("opensky_encsec");
+  }
+  preferences.remove("opensky_user");
+  preferences.remove("opensky_pass");
+  preferences.remove("opensky_enc");
   preferences.end();
 }
 
@@ -201,22 +451,22 @@ String planeDetailsTicker(const Plane &plane) {
 }
 
 void drawBatteryIndicator(int right, int top) {
-  const int battery = constrain((int)M5.Power.getBatteryLevel(), 0, 100);
+  const int battery = halGetBatteryLevel();
   const uint16_t color = battery <= 20 ? TFT_RED : battery <= 50 ? TFT_YELLOW : TFT_GREEN;
-  const bool charging = M5.Power.isCharging() == m5::Power_Class::is_charging;
+  const bool charging = halIsCharging();
   const int bodyX = right - 20;
-  M5.Display.setTextFont(1);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(color, TFT_BLACK);
-  M5.Display.drawString(String(battery) + "%", bodyX - 24, top);
-  M5.Display.drawRect(bodyX, top, 16, 8, color);
-  M5.Display.fillRect(bodyX + 16, top + 2, 2, 4, color);
+  halDisplay.setTextFont(1);
+  halDisplay.setTextSize(1);
+  halDisplay.setTextColor(color, TFT_BLACK);
+  halDisplay.drawString(String(battery) + "%", bodyX - 24, top);
+  halDisplay.drawRect(bodyX, top, 16, 8, color);
+  halDisplay.fillRect(bodyX + 16, top + 2, 2, 4, color);
   const int fillWidth = battery * 12 / 100;
-  if (fillWidth > 0) M5.Display.fillRect(bodyX + 2, top + 2, fillWidth, 4, color);
+  if (fillWidth > 0) halDisplay.fillRect(bodyX + 2, top + 2, fillWidth, 4, color);
   if (charging) {
-    M5.Display.drawLine(bodyX + 7, top + 1, bodyX + 5, top + 4, TFT_WHITE);
-    M5.Display.drawLine(bodyX + 5, top + 4, bodyX + 8, top + 4, TFT_WHITE);
-    M5.Display.drawLine(bodyX + 8, top + 4, bodyX + 6, top + 7, TFT_WHITE);
+    halDisplay.drawLine(bodyX + 7, top + 1, bodyX + 5, top + 4, TFT_WHITE);
+    halDisplay.drawLine(bodyX + 5, top + 4, bodyX + 8, top + 4, TFT_WHITE);
+    halDisplay.drawLine(bodyX + 8, top + 4, bodyX + 6, top + 7, TFT_WHITE);
   }
 }
 
@@ -224,14 +474,8 @@ void updateAutoRotation() {
   if (!settings.autoRotate || millis() - lastImuCheck < 250) return;
   lastImuCheck = millis();
 
-  float ax;
-  float ay;
-  float az;
-  float gx;
-  float gy;
-  float gz;
-  if (!M5.Imu.getAccelData(&ax, &ay, &az) ||
-      !M5.Imu.getGyroData(&gx, &gy, &gz)) return;
+  float ax, ay, az, gx, gy, gz;
+  if (!halReadImu(&ax, &ay, &az, &gx, &gy, &gz)) return;
 
   const float motion = fabsf(gx) + fabsf(gy) + fabsf(gz);
   if (motion < 15.0f) return;
@@ -241,7 +485,7 @@ void updateAutoRotation() {
   nextRotation = landscapeAxis > 0.0f ? 1 : 3;
   if (nextRotation != displayRotation) {
     displayRotation = nextRotation;
-    M5.Display.setRotation(displayRotation);
+    halDisplay.setRotation(displayRotation);
     lastDraw = 0;
   }
 }
@@ -274,6 +518,7 @@ void handleDebugStatus() {
   body += "\"rangeKm\":" + String(settings.rangeKm, 1) + ",";
   body += "\"refreshSeconds\":" + String(settings.refreshIntervalMs / 1000UL) + ",";
   body += "\"autoRotate\":" + String(settings.autoRotate ? "true" : "false") + ",";
+  body += "\"hasOpenSkyAuth\":" + String((settings.openSkyClientId.length() > 0 && settings.openSkyClientSecret.length() > 0) ? "true" : "false") + ",";
   body += "\"wifi\":\"" + jsonEscape(provisioningMode ? "setup-ap" : WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\",";
   body += "\"setupSsid\":\"" + jsonEscape(SETUP_AP_NAME) + "\",";
   body += "\"ip\":\"" + jsonEscape(provisioningMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + "\",";
@@ -307,6 +552,28 @@ void handleConfigSave() {
   settings.rangeKm = rangeKm;
   settings.refreshIntervalMs = refreshSeconds * 1000UL;
   settings.autoRotate = webServer.hasArg("autorotate");
+
+  if (webServer.hasArg("clear_opensky")) {
+    settings.openSkyClientId = "";
+    settings.openSkyClientSecret = "";
+    cachedOAuthToken = "";
+    oauthTokenExpiresAt = 0;
+  } else {
+    String newId = webServer.arg("opensky_id");
+    newId.trim();
+    if (newId.length() > 0) {
+      settings.openSkyClientId = newId;
+    }
+
+    String newSec = webServer.arg("opensky_sec");
+    newSec.trim();
+    if (newSec.length() > 0) {
+      settings.openSkyClientSecret = newSec;
+      cachedOAuthToken = "";
+      oauthTokenExpiresAt = 0;
+    }
+  }
+
   saveSettings();
   lastRefresh = 0;
   statusText = "CONFIGURED";
@@ -780,6 +1047,11 @@ void fetchPlanes() {
   HTTPClient http;
   http.setTimeout(15000);
   http.begin(client, openSkyUrl());
+  
+  String bearerToken = getOpenSkyOAuthToken();
+  if (bearerToken.length() > 0) {
+    http.addHeader("Authorization", "Bearer " + bearerToken);
+  }
   const char *responseHeaders[] = {"Content-Type"};
   http.collectHeaders(responseHeaders, 1);
   http.addHeader("Accept", "application/json");
@@ -856,20 +1128,35 @@ void fetchPlanes() {
 // Ensures the sprite exists and matches the current display size/rotation.
 // The canvas is recreated when the auto-rotate feature changes orientation.
 bool ensureRadarCanvas() {
-  const int width = M5.Display.width();
-  const int height = M5.Display.height();
-  const int rotation = M5.Display.getRotation();
+  const int width = halDisplay.width();
+  const int height = halDisplay.height();
+  const int rotation = halDisplay.getRotation();
   if (radarCanvasReady && width == radarCanvasWidth && height == radarCanvasHeight &&
       rotation == radarCanvasRotation) {
     return true;
   }
   radarCanvas.deleteSprite();
-  radarCanvas.setPsram(true);  // framebuffer lives in PSRAM, not scarce internal RAM
+  
+  bool psram = psramFound();
+  radarCanvas.setPsram(psram);
   radarCanvas.setColorDepth(16);
   if (radarCanvas.createSprite(width, height) == nullptr) {
-    radarCanvasReady = false;
-    return false;
+    if (psram) {
+      radarCanvas.setPsram(false);
+      if (radarCanvas.createSprite(width, height) != nullptr) {
+        goto sprite_success;
+      }
+    }
+    // Fallback to 8-bit color depth (requires 50% less RAM)
+    radarCanvas.setColorDepth(8);
+    if (radarCanvas.createSprite(width, height) == nullptr) {
+      radarCanvasReady = false;
+      Serial.println("[ERROR] Failed to allocate radarCanvas sprite!");
+      return false;
+    }
   }
+
+sprite_success:
   radarCanvas.setTextFont(2);
   radarCanvas.setTextSize(1);
   radarCanvas.setTextWrap(false);
@@ -881,16 +1168,22 @@ bool ensureRadarCanvas() {
 }
 
 void drawRadar() {
-  if (!ensureRadarCanvas()) return;
-  M5Canvas &gfx = radarCanvas;
-  const int width = radarCanvasWidth;
-  const int height = radarCanvasHeight;
+  Serial.println("[UI] drawRadar() called...");
+  bool useSprite = ensureRadarCanvas();
+  if (!useSprite) {
+    Serial.println("[UI] Using direct display rendering (RAM fallback)");
+  }
+  lgfx::LovyanGFX &gfx = useSprite ? static_cast<lgfx::LovyanGFX&>(radarCanvas) : static_cast<lgfx::LovyanGFX&>(halDisplay);
+  const int width = halDisplay.width();
+  const int height = halDisplay.height();
   const int infoWidth = min(104, width / 2);
   const int radarWidth = width - infoWidth;
   const int radius = min(height / 2 - 12, radarWidth / 2 - 6);
   const int centerX = radarWidth / 2;
   const int centerY = height / 2;
   const int infoX = radarWidth + 4;
+
+  if (!useSprite) halDisplay.startWrite();
 
   gfx.fillScreen(TFT_BLACK);
   gfx.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
@@ -916,7 +1209,7 @@ void drawRadar() {
   } else {
     gfx.setTextColor(TFT_WHITE, TFT_BLACK);
     gfx.drawString("No aircraft", infoX, 28);
-    gfx.drawString("BLUE SELECT", infoX, 48);
+    gfx.drawString(hasTouchscreen ? "TAP REFRESH" : "BLUE SELECT", infoX, 48);
   }
 
   gfx.drawCircle(centerX, centerY, radius, TFT_DARKGREEN);
@@ -952,30 +1245,40 @@ void drawRadar() {
   gfx.setTextColor(TFT_CYAN, TFT_BLACK);
   gfx.setTextSize(1);
 
-  // Push the finished frame to the panel in one transfer; no visible erase.
-  M5.Display.startWrite();
-  radarCanvas.pushSprite(0, 0);
-  M5.Display.endWrite();
+  // On touchscreen devices, render touch hint buttons at bottom of info panel
+  if (hasTouchscreen) {
+    gfx.drawRect(infoX, height - 18, infoWidth - 6, 16, TFT_DARKGREEN);
+    gfx.setTextColor(TFT_GREEN, TFT_BLACK);
+    gfx.drawString("< PREV|NEXT >", infoX + 2, height - 16);
+  }
+
+  if (useSprite) {
+    halDisplay.startWrite();
+    radarCanvas.pushSprite(&halDisplay, 0, 0);
+    halDisplay.endWrite();
+  } else {
+    halDisplay.endWrite();
+  }
   drawBatteryIndicator(radarWidth - 4, 5);
 }
 
 void drawIpOverlay() {
   if (ipOverlayUntil == 0 || (long)(ipOverlayUntil - millis()) <= 0) return;
 
-  const int width = M5.Display.width();
-  const int height = M5.Display.height();
+  const int width = halDisplay.width();
+  const int height = halDisplay.height();
   const String address = WiFi.status() == WL_CONNECTED
                              ? WiFi.localIP().toString()
                              : "NO WIFI";
-  M5.Display.fillRect(8, 30, width - 16, height - 60, TFT_BLACK);
-  M5.Display.drawRect(8, 30, width - 16, height - 60, TFT_CYAN);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.setTextSize(1);
-  M5.Display.drawString("DEVICE WEB UI", 18, 42);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString(address, 18, 62);
-  M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString("http://" + address, 18, 76);
+  halDisplay.fillRect(8, 30, width - 16, height - 60, TFT_BLACK);
+  halDisplay.drawRect(8, 30, width - 16, height - 60, TFT_CYAN);
+  halDisplay.setTextColor(TFT_CYAN, TFT_BLACK);
+  halDisplay.setTextSize(1);
+  halDisplay.drawString("DEVICE WEB UI", 18, 42);
+  halDisplay.setTextColor(TFT_WHITE, TFT_BLACK);
+  halDisplay.drawString(address, 18, 62);
+  halDisplay.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  halDisplay.drawString("http://" + address, 18, 76);
 }
 
 bool ipOverlayActive() {
@@ -983,58 +1286,58 @@ bool ipOverlayActive() {
 }
 
 void drawMenu() {
-  const int width = M5.Display.width();
-  const int height = M5.Display.height();
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString("PLANE TRACKER", 10, 5);
-  M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString(provisioningMode ? "SETUP AP" : "WEB UI ON", width - 70, 5);
-  M5.Display.drawLine(8, 19, width - 8, 19, TFT_DARKGREEN);
+  const int width = halDisplay.width();
+  const int height = halDisplay.height();
+  halDisplay.fillScreen(TFT_BLACK);
+  halDisplay.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
+  halDisplay.setTextSize(1);
+  halDisplay.setTextColor(TFT_CYAN, TFT_BLACK);
+  halDisplay.drawString("PLANE TRACKER", 10, 5);
+  halDisplay.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  halDisplay.drawString(provisioningMode ? "SETUP AP" : "WEB UI ON", width - 70, 5);
+  halDisplay.drawLine(8, 19, width - 8, 19, TFT_DARKGREEN);
   const int rowX = 8;
   const int rowWidth = width - 16;
   const int rowHeight = 27;
   const int rowY = 27;
-  M5.Display.fillRect(rowX, rowY, rowWidth, rowHeight, TFT_GREEN);
-  M5.Display.fillRect(rowX, rowY, 4, rowHeight, TFT_YELLOW);
+  halDisplay.fillRect(rowX, rowY, rowWidth, rowHeight, TFT_GREEN);
+  halDisplay.fillRect(rowX, rowY, 4, rowHeight, TFT_YELLOW);
   const int iconX = 27;
   const int iconY = rowY + rowHeight / 2 - 1;
-  M5.Display.setTextColor(TFT_BLACK, TFT_BLACK);
-  M5.Display.drawCircle(iconX, iconY, 8, TFT_BLACK);
-  M5.Display.drawCircle(iconX, iconY, 3, TFT_BLACK);
-  M5.Display.drawLine(iconX, iconY, iconX + 8, iconY - 6, TFT_BLACK);
-  M5.Display.drawString("PLANE RADAR", 48, rowY + 9);
-  M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString("SELECT", width - 48, height - 13);
+  halDisplay.setTextColor(TFT_BLACK, TFT_BLACK);
+  halDisplay.drawCircle(iconX, iconY, 8, TFT_BLACK);
+  halDisplay.drawCircle(iconX, iconY, 3, TFT_BLACK);
+  halDisplay.drawLine(iconX, iconY, iconX + 8, iconY - 6, TFT_BLACK);
+  halDisplay.drawString("PLANE RADAR", 48, rowY + 9);
+  halDisplay.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  halDisplay.drawString(hasTouchscreen ? "TAP SELECT" : "SELECT", width - (hasTouchscreen ? 70 : 48), height - 13);
   menuNeedsRedraw = false;
 }
 
 void drawFirmwareUpdate() {
-  const int width = M5.Display.width();
-  const int height = M5.Display.height();
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.drawString("FIRMWARE UPDATE", 10, 8);
-  M5.Display.setTextColor(updateScreenError ? TFT_RED : updateReady ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString(updateScreenError ? "UPDATE FAILED" : updateReady ? "UPDATE READY" : "UPLOADING", 10, 32);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString(String(updateBytesWritten) + " bytes", 10, 52);
+  const int width = halDisplay.width();
+  const int height = halDisplay.height();
+  halDisplay.fillScreen(TFT_BLACK);
+  halDisplay.drawRect(1, 1, width - 2, height - 2, TFT_DARKGREEN);
+  halDisplay.setTextSize(1);
+  halDisplay.setTextColor(TFT_CYAN, TFT_BLACK);
+  halDisplay.drawString("FIRMWARE UPDATE", 10, 8);
+  halDisplay.setTextColor(updateScreenError ? TFT_RED : updateReady ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+  halDisplay.drawString(updateScreenError ? "UPDATE FAILED" : updateReady ? "UPDATE READY" : "UPLOADING", 10, 32);
+  halDisplay.setTextColor(TFT_WHITE, TFT_BLACK);
+  halDisplay.drawString(String(updateBytesWritten) + " bytes", 10, 52);
   if (!updateScreenError && !updateReady) {
-    M5.Display.drawRect(10, 72, width - 20, 12, TFT_DARKGREEN);
-    M5.Display.fillRect(12, 74, min((int)(updateBytesWritten / 8192), width - 24), 8, TFT_GREEN);
+    halDisplay.drawRect(10, 72, width - 20, 12, TFT_DARKGREEN);
+    halDisplay.fillRect(12, 74, min((int)(updateBytesWritten / 8192), width - 24), 8, TFT_GREEN);
   } else if (updateReady) {
-    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    M5.Display.drawString("PRESS BLUE TO REBOOT", 10, 76);
+    halDisplay.setTextColor(TFT_YELLOW, TFT_BLACK);
+    halDisplay.drawString(hasTouchscreen ? "TAP SCREEN TO REBOOT" : "PRESS BLUE TO REBOOT", 10, 76);
   } else {
-    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
-    M5.Display.drawString(scrollingText(updateFailure, 20), 10, 76);
+    halDisplay.setTextColor(TFT_RED, TFT_BLACK);
+    halDisplay.drawString(scrollingText(updateFailure, 20), 10, 76);
   }
-  M5.Display.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-  M5.Display.drawString(updateReady ? "BLUE REBOOT" : "BLUE BACK", 10, height - 14);
+  halDisplay.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  halDisplay.drawString(updateReady ? (hasTouchscreen ? "TAP REBOOT" : "BLUE REBOOT") : (hasTouchscreen ? "TAP BACK" : "BLUE BACK"), 10, height - 14);
   drawBatteryIndicator(width - 4, 5);
   updateScreenNeedsRedraw = false;
 }
@@ -1111,21 +1414,37 @@ void handleFirmwareUpdateButtons() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.print("Reset reason: ");
-  Serial.println((int)esp_reset_reason());
-  auto configuration = M5.config();
-  M5.begin(configuration);
-  M5.Display.setRotation(1);
+  delay(500);
+  Serial.println("==========================================");
+  Serial.println("[MAIN] ESP32-S3 Plane Tracker starting...");
+  Serial.printf("[MAIN] Reset reason: %d\n", (int)esp_reset_reason());
+  Serial.printf("[MAIN] PSRAM found: %s (Size: %d bytes)\n", psramFound() ? "YES" : "NO", psramFound() ? ESP.getPsramSize() : 0);
+  Serial.printf("[MAIN] Free Heap: %d bytes\n", ESP.getFreeHeap());
+
+  Serial.println("[MAIN] Initializing Hardware Abstraction Layer...");
+  halInit();
+
   displayRotation = 1;
-  M5.Display.setTextFont(2);
+  halDisplay.setTextFont(2);
+  Serial.printf("[MAIN] halDisplay width=%d, height=%d\n", halDisplay.width(), halDisplay.height());
+
+  Serial.println("[MAIN] Loading NVS settings...");
   loadSettings();
+
+  Serial.println("[MAIN] Connecting Wi-Fi...");
   connectWifi();
+
+  Serial.println("[MAIN] Starting Debug Web Server...");
   startDebugServer();
+
+  Serial.println("[MAIN] Entering Tracker mode...");
   enterTracker();
+  Serial.println("[MAIN] Setup completed successfully!");
+  Serial.println("==========================================");
 }
 
 void loop() {
-  M5.update();
+  halUpdate();
   if (debugServerStarted) webServer.handleClient();
   if (appMode == MODE_MENU) {
     handleMenuButtons();
