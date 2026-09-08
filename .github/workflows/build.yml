@@ -63,6 +63,7 @@ jobs:
           path: docs
 
   deploy-pages:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
