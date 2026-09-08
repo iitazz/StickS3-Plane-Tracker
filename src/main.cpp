@@ -1267,9 +1267,9 @@ void drawIpOverlay() {
 
   const int width = halDisplay.width();
   const int height = halDisplay.height();
-  const String address = WiFi.status() == WL_CONNECTED
-                             ? WiFi.localIP().toString()
-                             : "NO WIFI";
+  const String address = provisioningMode      ? WiFi.softAPIP().toString()
+                          : WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString()
+                                                           : "NO WIFI";
   halDisplay.fillRect(8, 30, width - 16, height - 60, TFT_BLACK);
   halDisplay.drawRect(8, 30, width - 16, height - 60, TFT_CYAN);
   halDisplay.setTextColor(TFT_CYAN, TFT_BLACK);
