@@ -2,11 +2,20 @@ name: Build firmware
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -39,3 +48,27 @@ jobs:
         with:
           generate_release_notes: true
           files: builds/universal/plane-tracking.bin
+
+      - name: Assemble web flasher assets
+        run: |
+          mkdir -p docs/firmware
+          cp builds/universal/bootloader.bin docs/firmware/bootloader.bin
+          cp builds/universal/partitions.bin docs/firmware/partitions.bin
+          cp builds/universal/plane-tracking.bin docs/firmware/firmware.bin
+          cp "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" docs/firmware/boot_app0.bin
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy-pages:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

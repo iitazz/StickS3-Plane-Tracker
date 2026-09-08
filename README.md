@@ -6,6 +6,12 @@ Universal Arduino/PlatformIO firmware that runs on both **M5StickS3** and **Free
 
 ## Build and flash
 
+### Option 1: Web flasher (no software install)
+
+Connect the device over USB and flash the latest `main` build straight from a Chromium-based browser (Chrome, Edge, Brave, Opera) using the **[Web Flasher](https://iitazz.github.io/StickS3-Plane-Tracker/)** hosted on GitHub Pages. It's rebuilt automatically on every push to `main`.
+
+### Option 2: PlatformIO
+
 Open the project in VS Code with PlatformIO installed, then run:
 
 ```bash
